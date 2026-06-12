@@ -219,6 +219,7 @@
     <div class="pill" id="teamA"><span class="k">Orange</span><span class="v">0</span></div>
     <div class="pill" id="teamB"><span class="k">Cyan</span><span class="v">0</span></div>
     <div class="pill" id="myscore"><span class="k">Your Pts</span><span class="v">0</span></div>
+    <div class="pill" id="botPill"><span class="k">Bots</span><span class="v">25%</span></div>
   </div>
 
   <div class="hud-tr">
@@ -483,6 +484,8 @@ const GAME={
   flags:{}, zones:[], started:false,
 };
 const KILLNAMES=['Vandal','Rook','Tango','Nyx','Crash','Vega','Slick','Bishop','Onyx','Drift','Havok','Echo','Sable','Ghost'];
+let matchNumber=0;      // increments each new match
+let BOT_DIFF=0.25;      // bot skill 0..1, starts 25%, +25% per match
 
 function makePlayer(team,isBot,name){
   const color = GAME.teamMode ? TEAM_COLORS[team] : (isBot? 0x8aa0c8 : 0xff5a1f);
@@ -496,7 +499,7 @@ function makePlayer(team,isBot,name){
     ammo: CFG.ammo, lastShot:0,
     score:0,
     // bot ai
-    aiTarget:null, aiStrafe:1, aiRepath:0, aiReact:0, aiObjective:0,
+    aiTarget:null, aiStrafe:1, aiRepath:0, aiReact:0, aiNextShot:0, aiObjective:0,
     carryingFlag:null, walkPhase:Math.random()*6.28
   };
 }
@@ -512,6 +515,7 @@ function spawnPoint(team,idx){
 }
 
 function setupMatch(){
+  matchNumber++; BOT_DIFF=Math.min(1, 0.25*matchNumber);
   GAME.teamMode = CFG.mode!=='ffa';
   GAME.objMode = (CFG.mode==='ctf'||CFG.mode==='dom');
   GAME.players.forEach(p=>scene.remove(p.group));
@@ -530,8 +534,9 @@ function setupMatch(){
   }
 
   // CTF flags / DOM zones
+  Object.values(GAME.flags).forEach(f=>{if(f&&f.mesh)scene.remove(f.mesh);});
   GAME.flags={};
-  GAME.zones.forEach(z=>scene.remove(z.mesh)); GAME.zones=[];
+  GAME.zones.forEach(z=>{scene.remove(z.mesh); if(z.pad)scene.remove(z.pad);}); GAME.zones=[];
   if(CFG.mode==='ctf'){
     GAME.flags.A=makeFlag(-ARENA+8,0,TEAM_COLORS.A,'A');
     GAME.flags.B=makeFlag(ARENA-8,0,TEAM_COLORS.B,'B');
@@ -543,6 +548,7 @@ function setupMatch(){
   document.getElementById('modeLabel').textContent=
     ({ffa:'Free For All',team:'Real vs Bots',mixed:'Mixed Teams',ctf:'Capture Flag',dom:'Domination'})[CFG.mode];
   document.getElementById('targetLabel').textContent='→ '+CFG.winScore;
+  const bp=document.querySelector('#botPill .v'); if(bp)bp.textContent=Math.round(BOT_DIFF*100)+'%';
   renderRoundDots();
 }
 
@@ -678,9 +684,11 @@ function shoot(p){
   if(p===GAME.local) viewModel.position.z = -0.40;
   beep(p.gunIdx);
 
+  const botErr = p.isBot ? (1-BOT_DIFF)*0.10 : 0;   // weaker bots aim worse
   for(let k=0;k<g.pellets;k++){
+    const sp=g.spread+botErr;
     const dir=forwardVec(p.yaw,p.pitch,new THREE.Vector3());
-    dir.x+=(Math.random()*2-1)*g.spread; dir.y+=(Math.random()*2-1)*g.spread; dir.z+=(Math.random()*2-1)*g.spread;
+    dir.x+=(Math.random()*2-1)*sp; dir.y+=(Math.random()*2-1)*sp; dir.z+=(Math.random()*2-1)*sp;
     dir.normalize();
     // obstacle distance
     raycaster.set(origin,dir); raycaster.far=g.range;
@@ -854,7 +862,7 @@ function startRound(){
   GAME.zones.forEach(z=>z.owner=null);
   updateScoreboard(); updateGunHud();
   GAME.state='countdown';
-  centerMsg(`ROUND ${GAME.round}`,'GET READY');
+  centerMsg(`ROUND ${GAME.round}`,`GET READY · BOTS ${Math.round(BOT_DIFF*100)}%`);
   let c=3; const cd=setInterval(()=>{ c--; if(c>0)centerMsg(`ROUND ${GAME.round}`,c+''); else{clearInterval(cd);centerMsg('FIGHT','');setTimeout(hideCenter,700);GAME.state='play';} },700);
 }
 function centerMsg(big,sub){const m=document.getElementById('center-msg');m.style.display='block';m.childNodes[0].nodeValue=big;document.getElementById('center-sub').textContent=sub;}
@@ -993,8 +1001,12 @@ function updateBot(p,dt){
     p.yaw+=dy*Math.min(1,dt*7);
     p.pitch=Math.atan2((tgt.pos.y+1.1)-(p.pos.y+1.5), Math.max(2,dist));
     if(los && dist<g.range*0.9){
-      wantShoot = Math.abs(dy)<0.18 && now>p.aiReact;
-      if(now>p.aiReact && Math.random()<0.02) p.aiReact=now+0.15+Math.random()*0.3;
+      const d=BOT_DIFF;
+      const aimTol = 0.08 + (1-d)*0.22;              // weaker bots fire while only loosely aligned (and miss via spread)
+      if(Math.abs(dy)<aimTol && now>p.aiNextShot){
+        wantShoot = true;
+        p.aiNextShot = now + (0.12 + (1-d)*0.55) + Math.random()*(0.15 + (1-d)*0.5); // weaker bots pause longer
+      }
       // strafe + keep range
       const ideal = p.gunIdx===2?28:(p.gunIdx===1?7:14);
       const toward = dist>ideal?1:-0.6;
@@ -1214,9 +1226,10 @@ function bonusComplete(){
   BONUS.active=false; GAME.state='matchover';
   document.getElementById('bonusHud').style.display='none';
   document.getElementById('ovTitle').textContent='🎯 BONUS CLEARED';
-  document.getElementById('ovText').textContent='All 10 sniper stages down. Sharpshooter status: confirmed.';
-  document.getElementById('ovNext').textContent='Back to Menu ▸';
-  overlayCb=()=>location.reload(); overlay.style.display='flex';
+  document.getElementById('ovText').textContent='All 10 sniper stages down. Next match, the bots crank up.';
+  document.getElementById('ovNext').textContent='Next Match ▸';
+  overlayCb=()=>{ document.getElementById('hud').style.display='block'; setupMatch(); startRound(); };
+  overlay.style.display='flex';
 }
 function updateBonus(dt){
   const t=performance.now()/1000;
