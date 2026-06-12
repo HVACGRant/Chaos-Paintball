@@ -74,6 +74,10 @@
   #gunName{font-size:18px;font-weight:900;}
   #ammoHud{font-family:'Courier New',monospace;font-size:18px;color:var(--cyan);}
   #killfeed{position:absolute;top:70px;right:14px;display:flex;flex-direction:column;gap:5px;align-items:flex-end;}
+  #healthHud{position:absolute;bottom:18px;left:50%;transform:translateX(-50%);width:260px;height:18px;
+    background:rgba(12,15,22,.82);border:1px solid var(--line);border-radius:10px;overflow:hidden;backdrop-filter:blur(6px);}
+  #healthFill{height:100%;width:100%;background:linear-gradient(90deg,#3ddc84,#9be15d);transition:width .12s, background .2s;}
+  #healthNum{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);font-size:11px;font-weight:900;color:#06210f;text-shadow:0 1px 0 rgba(255,255,255,.3);}
   .kf{background:rgba(12,15,22,.7);border:1px solid var(--line);border-radius:8px;padding:5px 10px;font-size:12px;opacity:.95;}
   #center-msg{position:absolute;left:50%;top:38%;transform:translate(-50%,-50%);text-align:center;
     font-size:40px;font-weight:900;letter-spacing:2px;text-shadow:0 4px 20px #000;display:none;}
@@ -232,10 +236,11 @@
   <div class="hud-bl">
     <div id="gunHud"><span id="gunName">PISTOL</span><span id="ammoHud">∞</span></div>
   </div>
+  <div id="healthHud"><div id="healthFill"></div><span id="healthNum">100</span></div>
 
   <div id="center-msg">ROUND 1<div id="center-sub">FIGHT</div></div>
   <div id="respawn"><div class="big">3</div><div style="color:var(--dim)">RESPAWNING</div></div>
-  <div id="esc-tip">↑↓ move · ←→ turn · (WASD works too) · click: fire · right-click: scope · 1/2/3: guns · V: view · SHIFT: sprint · ESC: pause</div>
+  <div id="esc-tip">↑↓ move · ←→ turn · SPACE / click: fire · F: jump · right-click: scope · 1/2/3: guns · V: view · SHIFT: sprint · ESC: pause</div>
 </div>
 
 <!-- ===================== TOUCH ===================== -->
@@ -288,10 +293,11 @@ import * as THREE from 'three';
 const CFG = {
   mode:'ffa', view:'fps', players:10, gun:0, ammo:-1, winScore:100, room:'----'
 };
+const HP_MAX=100;
 const GUNS = [
-  { name:'PISTOL',  pts:1, cd:0.16, spread:0.012, pellets:1, range:120, dmgKill:true,  scope:1.0, color:0xffc14d, auto:true },
-  { name:'SHOTGUN', pts:2, cd:0.62, spread:0.085, pellets:7, range:42,  dmgKill:true,  scope:1.0, color:0xff5a1f, auto:false },
-  { name:'SNIPER',  pts:3, cd:0.95, spread:0.0,   pellets:1, range:400, dmgKill:true,  scope:3.0, color:0x22d3ee, auto:false },
+  { name:'PISTOL',  pts:1, dmg:5,  cd:0.16, spread:0.012, pellets:1, range:120, scope:1.0, color:0xffc14d, auto:true },
+  { name:'SHOTGUN', pts:2, dmg:5,  cd:0.62, spread:0.085, pellets:7, range:42,  scope:1.0, color:0xff5a1f, auto:false },
+  { name:'SNIPER',  pts:3, dmg:25, cd:0.95, spread:0.0,   pellets:1, range:400, scope:3.0, color:0x22d3ee, auto:false },
 ];
 const TEAM_COLORS = { A:0xff5a1f, B:0x22d3ee };
 
@@ -487,14 +493,22 @@ const KILLNAMES=['Vandal','Rook','Tango','Nyx','Crash','Vega','Slick','Bishop','
 let matchNumber=0;      // increments each new match
 let BOT_DIFF=0.25;      // bot skill 0..1, starts 25%, +25% per match
 
+function makeHpBar(){
+  const bg=new THREE.Mesh(new THREE.PlaneGeometry(1.1,0.16),new THREE.MeshBasicMaterial({color:0x0b0e14,transparent:true,opacity:0.85}));
+  const fill=new THREE.Mesh(new THREE.PlaneGeometry(1.0,0.11),new THREE.MeshBasicMaterial({color:0x3ddc84}));
+  fill.position.z=0.003;
+  const g=new THREE.Group(); g.add(bg,fill); g.visible=false; scene.add(g);
+  return {g,fill};
+}
 function makePlayer(team,isBot,name){
   const color = GAME.teamMode ? TEAM_COLORS[team] : (isBot? 0x8aa0c8 : 0xff5a1f);
   const group=createAvatar(color);
   scene.add(group);
+  const hb=makeHpBar();
   return {
     name, team, isBot, color, group,
     pos:new THREE.Vector3(), vel:new THREE.Vector3(), yaw:0, pitch:0,
-    onGround:true, alive:true, respawnAt:0,
+    onGround:true, alive:true, respawnAt:0, hp:HP_MAX, hpGroup:hb.g, hpFill:hb.fill,
     gunIdx: isBot? Math.floor(Math.random()*3) : CFG.gun,
     ammo: CFG.ammo, lastShot:0,
     score:0,
@@ -518,7 +532,7 @@ function setupMatch(){
   matchNumber++; BOT_DIFF=Math.min(1, 0.25*matchNumber);
   GAME.teamMode = CFG.mode!=='ffa';
   GAME.objMode = (CFG.mode==='ctf'||CFG.mode==='dom');
-  GAME.players.forEach(p=>scene.remove(p.group));
+  GAME.players.forEach(p=>{scene.remove(p.group); if(p.hpGroup)scene.remove(p.hpGroup);});
   GAME.players=[];
   const N=CFG.players;
   const nA=Math.ceil(N/2), nB=N-nA;
@@ -575,17 +589,19 @@ function makeZone(x,z,id){
 // ============================================================
 const keys={};
 const isTouch = ('ontouchstart' in window)||navigator.maxTouchPoints>0;
-let pointerLocked=false, scoping=false, firing=false;
+let pointerLocked=false, scoping=false, firing=false, jumpQueued=false;
 const move={x:0,y:0}; // touch joystick
 let lookActive=false;
 
 addEventListener('keydown',e=>{keys[e.code]=true;
   if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code) && GAME.state!=='menu') e.preventDefault();
+  if(e.code==='Space' && !isTouch) firing=true;
+  if(e.code==='KeyF') jumpQueued=true;
   if(e.code==='Digit1')switchGun(0); if(e.code==='Digit2')switchGun(1); if(e.code==='Digit3')switchGun(2);
   if(e.code==='KeyV')toggleView();
   if(e.code==='Escape'&&GAME.state==='play')pauseGame();
 });
-addEventListener('keyup',e=>{keys[e.code]=false;});
+addEventListener('keyup',e=>{keys[e.code]=false; if(e.code==='Space')firing=false;});
 
 renderer.domElement.addEventListener('click',()=>{
   if((GAME.state==='play'||GAME.state==='bonus')&&!isTouch&&!pointerLocked) renderer.domElement.requestPointerLock();
@@ -623,7 +639,7 @@ const lookpad=document.getElementById('lookpad'); let lookId=null, lookLast={x:0
 lookpad.addEventListener('touchstart',e=>{e.preventDefault();const t=e.changedTouches[0];lookId=t.identifier;lookLast={x:t.clientX,y:t.clientY};},{passive:false});
 document.getElementById('fireBtn').addEventListener('touchstart',e=>{e.preventDefault();firing=true;},{passive:false});
 document.getElementById('fireBtn').addEventListener('touchend',e=>{e.preventDefault();firing=false;},{passive:false});
-document.getElementById('jumpBtn').addEventListener('touchstart',e=>{e.preventDefault();keys['Space']=true;setTimeout(()=>keys['Space']=false,80);},{passive:false});
+document.getElementById('jumpBtn').addEventListener('touchstart',e=>{e.preventDefault();jumpQueued=true;},{passive:false});
 document.getElementById('scopeBtn').addEventListener('touchstart',e=>{e.preventDefault();scoping=!scoping;},{passive:false});
 document.querySelectorAll('.gunpick').forEach(b=>b.addEventListener('touchstart',e=>{e.preventDefault();switchGun(+b.dataset.g);},{passive:false}));
 
@@ -707,8 +723,8 @@ function shoot(p){
     }
     if(victim){
       tracer(origin, _tmp.copy(origin).add(dir.clone().multiplyScalar(best)), g.color);
-      eliminate(victim,p,g);
-      break; // shotgun: one confirmed hit is enough to splat them
+      damage(victim,p,g);
+      // no break: shotgun pellets each land for stacked damage
     } else {
       const endPt = obPoint || _tmp.copy(origin).add(dir.clone().multiplyScalar(g.range));
       tracer(origin,endPt,g.color);
@@ -729,6 +745,31 @@ function splat(point,normal,color){
   m.lookAt(point.clone().add(normal));
   scene.add(m); splats.push({mesh:m,life:8});
   if(splats.length>60){const old=splats.shift();scene.remove(old.mesh);}
+}
+
+function damage(victim,shooter,gun){
+  if(!victim.alive)return;
+  victim.hp-=gun.dmg;
+  splat(bodyCenter(victim,new THREE.Vector3()), new THREE.Vector3(0,1,0), shooter.color);
+  if(victim===GAME.local) flashHit();
+  if(shooter===GAME.local && victim.hp>0) hitMarker();
+  if(victim.hp<=0){ victim.hp=0; eliminate(victim,shooter,gun); }
+}
+function hitMarker(){
+  const c=document.getElementById('cross');
+  c.style.transition='none'; c.style.transform='translate(-50%,-50%) scale(1.6)';
+  requestAnimationFrame(()=>{ c.style.transition='transform .12s'; c.style.transform='translate(-50%,-50%) scale(1)'; });
+}
+function updateLocalHealthHud(){
+  const p=GAME.local; if(!p)return;
+  const pct=Math.max(0,p.hp)/HP_MAX;
+  const fill=document.getElementById('healthFill'), num=document.getElementById('healthNum');
+  if(!fill)return;
+  fill.style.width=(pct*100)+'%';
+  num.textContent=p.alive?Math.max(0,Math.round(p.hp)):'DOWN';
+  fill.style.background = p.hp<30?'linear-gradient(90deg,#ff4d6d,#ff7a5a)'
+                       : p.hp<60?'linear-gradient(90deg,#ffb347,#ffd86b)'
+                       : 'linear-gradient(90deg,#3ddc84,#9be15d)';
 }
 
 function eliminate(victim,shooter,gun){
@@ -852,7 +893,7 @@ function exitLock(){ if(document.pointerLockElement)document.exitPointerLock(); 
 function startRound(){
   GAME.scoreA=0; GAME.scoreB=0; winLatch=false;
   GAME.players.forEach((p,i)=>{
-    p.score=0; p.alive=true; p.group.visible=true; p.vel.set(0,0,0);
+    p.score=0; p.alive=true; p.group.visible=true; p.vel.set(0,0,0); p.hp=HP_MAX;
     const sp=spawnPoint(p.team,i); p.pos.copy(sp);
     p.yaw = GAME.teamMode ? (p.team==='A'? 0:Math.PI) : Math.random()*6.28;
     p.gunIdx = p.isBot? Math.floor(Math.random()*3) : CFG.gun;
@@ -929,7 +970,8 @@ function updateLocal(dt){
   const len=Math.hypot(dx,dz); if(len>1){dx/=len;dz/=len;}
   p.vel.x=dx*speed; p.vel.z=dz*speed;
   // jump + gravity
-  if((keys['Space'])&&p.onGround){p.vel.y=7.2;p.onGround=false;}
+  if(jumpQueued&&p.onGround){p.vel.y=7.2;p.onGround=false;}
+  jumpQueued=false;
   p.vel.y-=22*dt;
   p.pos.x+=p.vel.x*dt; p.pos.z+=p.vel.z*dt; p.pos.y+=p.vel.y*dt;
   resolveCollision(p);
@@ -943,7 +985,7 @@ function handleRespawns(){
   const now=performance.now()/1000;
   for(const p of GAME.players){
     if(!p.alive && now>=p.respawnAt){
-      p.alive=true; p.group.visible=true;
+      p.alive=true; p.group.visible=true; p.hp=HP_MAX;
       const i=GAME.players.indexOf(p); p.pos.copy(spawnPoint(p.team,i)); p.vel.set(0,0,0);
     }
   }
@@ -1099,6 +1141,17 @@ function animateAvatar(p,dt){
   } else { u.legL.rotation.x*=0.8;u.legR.rotation.x*=0.8;u.armL.rotation.x*=0.8;u.armR.rotation.x*=0.8; }
   // head pitch
   u.head.rotation.x=-p.pitch*0.5;
+  // floating health bar (billboarded to camera), hidden for local + dead
+  if(p.hpGroup){
+    if(p.alive && p!==GAME.local){
+      p.hpGroup.visible=true;
+      p.hpGroup.position.set(p.pos.x,p.pos.y+2.25,p.pos.z);
+      p.hpGroup.quaternion.copy(camera.quaternion);
+      const s=Math.max(0,p.hp)/HP_MAX;
+      p.hpFill.scale.x=s; p.hpFill.position.x=-(1-s)*0.5;
+      p.hpFill.material.color.setHex(p.hp<30?0xff4d6d:p.hp<60?0xffb347:0x3ddc84);
+    } else p.hpGroup.visible=false;
+  }
 }
 
 function updateCamera(dt){
@@ -1259,6 +1312,7 @@ function loop(){
     for(const p of GAME.players){ if(p.isBot)updateBot(p,dt); }
     handleRespawns();
     objectiveTick(dt);
+    updateLocalHealthHud();
   }
   for(const p of GAME.players) animateAvatar(p,dt);
   if(GAME.local) updateCamera(dt);
