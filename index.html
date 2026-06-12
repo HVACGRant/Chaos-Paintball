@@ -514,6 +514,7 @@ function makePlayer(team,isBot,name){
     score:0,
     // bot ai
     aiTarget:null, aiStrafe:1, aiRepath:0, aiReact:0, aiNextShot:0, aiObjective:0,
+    aiState:'patrol', lastSeen:new THREE.Vector3(), alertUntil:0, patrolTarget:null,
     carryingFlag:null, walkPhase:Math.random()*6.28
   };
 }
@@ -695,6 +696,7 @@ function shoot(p){
   if(now-p.lastShot < g.cd) return;
   if(!p.isBot && CFG.ammo>=0){ if(p.ammo<=0)return; p.ammo--; updateGunHud(); }
   p.lastShot=now;
+  alertNoise(p, 1, 6);   // gunfire is heard by nearby enemies
   const origin=eyePos(p,new THREE.Vector3());
   // recoil bump on viewmodel for local
   if(p===GAME.local) viewModel.position.z = -0.40;
@@ -894,6 +896,7 @@ function startRound(){
   GAME.scoreA=0; GAME.scoreB=0; winLatch=false;
   GAME.players.forEach((p,i)=>{
     p.score=0; p.alive=true; p.group.visible=true; p.vel.set(0,0,0); p.hp=HP_MAX;
+    p.alertUntil=0; p.aiState='patrol'; p.patrolTarget=null; p.aiTarget=null;
     const sp=spawnPoint(p.team,i); p.pos.copy(sp);
     p.yaw = GAME.teamMode ? (p.team==='A'? 0:Math.PI) : Math.random()*6.28;
     p.gunIdx = p.isBot? Math.floor(Math.random()*3) : CFG.gun;
@@ -962,13 +965,17 @@ function updateLocal(dt){
     if(keys['KeyS']||keys['ArrowDown']) fz-=1;
     if(keys['KeyA'])fx-=1; if(keys['KeyD'])fx+=1;
   } else { fx=move.x; fz=-move.y; }
-  const sprint=(keys['ShiftLeft']||keys['ShiftRight'])?1.7:1;
+  const sprinting=(keys['ShiftLeft']||keys['ShiftRight']);
+  const sprint=sprinting?1.7:1;
   const speed=6.2*sprint;
   // direction relative to yaw
   const sin=Math.sin(p.yaw),cos=Math.cos(p.yaw);
   let dx=(fx*cos+fz*sin), dz=(fz*cos-fx*sin);
   const len=Math.hypot(dx,dz); if(len>1){dx/=len;dz/=len;}
   p.vel.x=dx*speed; p.vel.z=dz*speed;
+  // sprinting is loud — quiet walking keeps you hidden
+  const now=performance.now()/1000;
+  if(sprinting && len>0.1 && now-lastFootstep>0.4){ lastFootstep=now; alertNoise(p, 0.35, 5); }
   // jump + gravity
   if(jumpQueued&&p.onGround){p.vel.y=7.2;p.onGround=false;}
   jumpQueued=false;
@@ -981,6 +988,7 @@ function updateLocal(dt){
 }
 
 let respawnShown=false;
+let lastFootstep=0;
 function handleRespawns(){
   const now=performance.now()/1000;
   for(const p of GAME.players){
@@ -1001,72 +1009,115 @@ function handleRespawns(){
 //  BOT AI
 // ============================================================
 const _bc=new THREE.Vector3(),_be=new THREE.Vector3(),_te=new THREE.Vector3();
+const _vEye=new THREE.Vector3(),_vCen=new THREE.Vector3();
+
+// bot senses scale with difficulty: weak bots are near-blind, strong bots sharp
+function botParams(d){
+  return {
+    sight: 16 + d*34,                                 // 25%→~25m, 100%→50m
+    fovCos: Math.cos((50 + d*40)*Math.PI/180),        // half-cone 50°→90°
+    hear:  7 + d*25,                                   // gunfire/footstep radius
+    search: 3 + d*4,                                   // how long they hunt a lost target
+  };
+}
+function canSee(p,e,pr){
+  const dx=e.pos.x-p.pos.x, dz=e.pos.z-p.pos.z;
+  const dist=Math.hypot(dx,dz);
+  if(dist>pr.sight) return false;
+  if(dist>5){                                          // beyond 5m must be inside the view cone
+    const fx=Math.sin(p.yaw), fz=Math.cos(p.yaw);
+    if((dx*fx+dz*fz)/(dist||1) < pr.fovCos) return false;
+  }
+  eyePos(p,_vEye); bodyCenter(e,_vCen);
+  return !rayBlocked(_vEye,_vCen);                     // cover always blocks sight
+}
+
+// noise: shots (and sprinting) alert nearby enemies to an approximate location
+function alertNoise(src, rangeMul, posNoise){
+  const d=BOT_DIFF, now=performance.now()/1000, hear=(7+d*25)*rangeMul;
+  for(const b of GAME.players){
+    if(!b.isBot||!b.alive||b===src)continue;
+    if(GAME.teamMode&&b.team===src.team)continue;      // only enemies care
+    if(b.pos.distanceTo(src.pos)<hear){
+      const n=(1-d)*posNoise;                          // weaker bots localize worse
+      b.lastSeen.set(src.pos.x+(Math.random()*2-1)*n, 0, src.pos.z+(Math.random()*2-1)*n);
+      b.alertUntil=Math.max(b.alertUntil, now+(3+d*4));
+    }
+  }
+}
+
 function updateBot(p,dt){
   if(!p.alive)return;
   const now=performance.now()/1000;
-  // acquire target
-  if(!p.aiTarget || !p.aiTarget.alive || now>p.aiRepath){
-    p.aiRepath=now+1.2+Math.random();
-    let best=Infinity,tgt=null;
-    for(const e of GAME.players){
-      if(e===p||!e.alive)continue;
-      if(GAME.teamMode&&e.team===p.team)continue;
-      const d=p.pos.distanceTo(e.pos);
-      if(d<best){best=d;tgt=e;}
-    }
-    p.aiTarget=tgt;
-    if(Math.random()<0.5)p.aiStrafe*=-1;
+  const d=BOT_DIFF, pr=botParams(d), g=GUNS[p.gunIdx];
+
+  // ---- PERCEPTION: only know what they can see ----
+  let seen=null, best=Infinity;
+  for(const e of GAME.players){
+    if(e===p||!e.alive)continue;
+    if(GAME.teamMode&&e.team===p.team)continue;
+    if(canSee(p,e,pr)){ const dd=p.pos.distanceTo(e.pos); if(dd<best){best=dd;seen=e;} }
   }
-  const g=GUNS[p.gunIdx];
+  if(seen){ p.aiTarget=seen; p.lastSeen.copy(seen.pos); p.alertUntil=now+pr.search; p.aiState='engage'; }
+  else if(now<p.alertUntil){ p.aiState='search'; }
+  else { p.aiState='patrol'; p.aiTarget=null; }
+
+  // objective pull (ctf/dom) only when not actively fighting
+  let objTarget=null;
+  if(p.aiState!=='engage'){
+    if(CFG.mode==='ctf'){
+      const enemyFlag=p.team==='A'?GAME.flags.B:GAME.flags.A;
+      const ownFlag=p.team==='A'?GAME.flags.A:GAME.flags.B;
+      if(p.carryingFlag) objTarget=ownFlag.home; else if(enemyFlag&&!enemyFlag.carried) objTarget=enemyFlag.pos;
+    } else if(CFG.mode==='dom' && GAME.zones.length){
+      const z=GAME.zones[Math.floor(p.aiObjective*GAME.zones.length)%GAME.zones.length];
+      if(z.owner!==p.team) objTarget=z.pos;
+    }
+  }
+
   let moveX=0,moveZ=0, wantShoot=false;
 
-  // objective bias (some bots chase flags / zones)
-  let objTarget=null;
-  if(CFG.mode==='ctf' && p.aiObjective<0.4){
-    const enemyFlag = p.team==='A'?GAME.flags.B:GAME.flags.A;
-    const ownFlag = p.team==='A'?GAME.flags.A:GAME.flags.B;
-    if(p.carryingFlag) objTarget=ownFlag.home; else if(enemyFlag&&!enemyFlag.carried) objTarget=enemyFlag.pos;
-  }
-  if(CFG.mode==='dom' && p.aiObjective<0.5 && GAME.zones.length){
-    let z=GAME.zones[Math.floor(p.aiObjective*GAME.zones.length)%GAME.zones.length];
-    if(z.owner!==p.team) objTarget=z.pos;
-  }
-
-  const tgt=p.aiTarget;
-  if(tgt){
-    eyePos(p,_be); bodyCenter(tgt,_bc);
-    const dist=p.pos.distanceTo(tgt.pos);
-    const los=!rayBlocked(_be,_bc);
-    // face target
+  if(p.aiState==='engage' && p.aiTarget){
+    const tgt=p.aiTarget, dist=p.pos.distanceTo(tgt.pos);
     const desiredYaw=Math.atan2(tgt.pos.x-p.pos.x, tgt.pos.z-p.pos.z);
     let dy=desiredYaw-p.yaw; while(dy>Math.PI)dy-=6.283; while(dy<-Math.PI)dy+=6.283;
     p.yaw+=dy*Math.min(1,dt*7);
     p.pitch=Math.atan2((tgt.pos.y+1.1)-(p.pos.y+1.5), Math.max(2,dist));
-    if(los && dist<g.range*0.9){
-      const d=BOT_DIFF;
-      const aimTol = 0.08 + (1-d)*0.22;              // weaker bots fire while only loosely aligned (and miss via spread)
-      if(Math.abs(dy)<aimTol && now>p.aiNextShot){
-        wantShoot = true;
-        p.aiNextShot = now + (0.12 + (1-d)*0.55) + Math.random()*(0.15 + (1-d)*0.5); // weaker bots pause longer
-      }
-      // strafe + keep range
-      const ideal = p.gunIdx===2?28:(p.gunIdx===1?7:14);
-      const toward = dist>ideal?1:-0.6;
-      const fwd=forwardVec(p.yaw,0,_te);
-      moveX += -fwd.z*p.aiStrafe*0.8 + fwd.x*toward;
-      moveZ +=  fwd.x*p.aiStrafe*0.8 + fwd.z*toward;
-    } else {
-      // move toward target
-      moveX += (tgt.pos.x-p.pos.x); moveZ += (tgt.pos.z-p.pos.z);
+    const aimTol=0.08+(1-d)*0.22;
+    if(Math.abs(dy)<aimTol && dist<g.range*0.9 && now>p.aiNextShot){
+      wantShoot=true; p.aiNextShot=now+(0.12+(1-d)*0.55)+Math.random()*(0.15+(1-d)*0.5);
     }
+    if(now>p.aiRepath){ p.aiRepath=now+1+Math.random(); if(Math.random()<0.5)p.aiStrafe*=-1; }
+    const ideal=p.gunIdx===2?28:(p.gunIdx===1?7:14);
+    const toward=dist>ideal?1:-0.6;
+    const fwd=forwardVec(p.yaw,0,_te);
+    moveX += -fwd.z*p.aiStrafe*0.8 + fwd.x*toward;
+    moveZ +=  fwd.x*p.aiStrafe*0.8 + fwd.z*toward;
   }
-  if(objTarget){ moveX += (objTarget.x-p.pos.x)*0.6; moveZ += (objTarget.z-p.pos.z)*0.6; }
+  else if(p.aiState==='search'){
+    const tx=objTarget?objTarget.x:p.lastSeen.x, tz=objTarget?objTarget.z:p.lastSeen.z;
+    const dx=tx-p.pos.x, dz=tz-p.pos.z, dist=Math.hypot(dx,dz);
+    if(dist<2.4){ p.alertUntil=Math.min(p.alertUntil, now+0.3); }   // reached the spot, about to give up
+    else { moveX+=dx; moveZ+=dz; }
+    const look=Math.atan2(dx,dz); let dy=look-p.yaw; while(dy>Math.PI)dy-=6.283;while(dy<-Math.PI)dy+=6.283;
+    p.yaw+=dy*Math.min(1,dt*4);
+  }
+  else { // patrol — wander / scan, drift toward objectives
+    if(!p.patrolTarget || p.pos.distanceTo(p.patrolTarget)<2.6 || now>p.aiRepath){
+      p.aiRepath=now+3+Math.random()*3;
+      p.patrolTarget = objTarget ? objTarget.clone()
+        : new THREE.Vector3((Math.random()*2-1)*(ARENA-6),0,(Math.random()*2-1)*(ARENA-6));
+    }
+    const dx=p.patrolTarget.x-p.pos.x, dz=p.patrolTarget.z-p.pos.z;
+    moveX+=dx; moveZ+=dz;
+    const look=Math.atan2(dx,dz); let dy=look-p.yaw; while(dy>Math.PI)dy-=6.283;while(dy<-Math.PI)dy+=6.283;
+    p.yaw+=dy*Math.min(1,dt*3);
+  }
 
-  const ml=Math.hypot(moveX,moveZ);
-  if(ml>0.01){ moveX/=ml; moveZ/=ml; }
-  const speed=5.2;
+  const ml=Math.hypot(moveX,moveZ); if(ml>0.01){ moveX/=ml; moveZ/=ml; }
+  const speed = p.aiState==='engage'?5.2 : (p.aiState==='search'?4.6:3.4);
   p.vel.x=moveX*speed; p.vel.z=moveZ*speed;
-  if(p.onGround && Math.random()<0.004){p.vel.y=7;p.onGround=false;}
+  if(p.onGround && Math.random()<0.003){p.vel.y=7;p.onGround=false;}
   p.vel.y-=22*dt;
   p.pos.x+=p.vel.x*dt; p.pos.z+=p.vel.z*dt; p.pos.y+=p.vel.y*dt;
   resolveCollision(p);
