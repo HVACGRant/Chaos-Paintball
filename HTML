@@ -736,13 +736,13 @@ function makeZone(x,z,id){
 // ============================================================
 const keys={};
 const isTouch = ('ontouchstart' in window)||navigator.maxTouchPoints>0;
-let pointerLocked=false, scoping=false, firing=false, jumpQueued=false, touchCrouch=false;
+let pointerLocked=false, scoping=false, firing=false, fireQueued=false, jumpQueued=false, touchCrouch=false;
 const move={x:0,y:0}; // touch joystick
 let lookActive=false;
 
 addEventListener('keydown',e=>{keys[e.code]=true;
   if(['ArrowUp','ArrowDown','ArrowLeft','ArrowRight','Space'].includes(e.code) && GAME.state!=='menu') e.preventDefault();
-  if(e.code==='Space' && !isTouch) firing=true;
+  if(e.code==='Space' && !isTouch){ firing=true; fireQueued=true; }
   if(e.code==='KeyF') jumpQueued=true;
   if(e.code==='Digit1')switchGun(0); if(e.code==='Digit2')switchGun(1); if(e.code==='Digit3')switchGun(2);
   if(e.code==='KeyV')toggleView();
@@ -752,7 +752,7 @@ addEventListener('keydown',e=>{keys[e.code]=true;
 addEventListener('keyup',e=>{keys[e.code]=false; if(e.code==='Space')firing=false;});
 
 renderer.domElement.addEventListener('click',()=>{
-  if((GAME.state==='play'||GAME.state==='bonus')&&!isTouch&&!pointerLocked) renderer.domElement.requestPointerLock();
+  if(GAME.state==='play'||GAME.state==='bonus'){ if(!isTouch&&!pointerLocked) renderer.domElement.requestPointerLock(); fireQueued=true; }
 });
 document.addEventListener('pointerlockchange',()=>{pointerLocked=document.pointerLockElement===renderer.domElement;});
 addEventListener('mousemove',e=>{
@@ -763,7 +763,7 @@ addEventListener('mousemove',e=>{
   GAME.local.pitch=Math.max(-1.4,Math.min(1.4,GAME.local.pitch));
 });
 addEventListener('mousedown',e=>{ if(GAME.state!=='play'&&GAME.state!=='bonus')return;
-  if(e.button===0)firing=true; if(e.button===2)scoping=true;});
+  if(e.button===0){firing=true; fireQueued=true;} if(e.button===2)scoping=true;});
 addEventListener('mouseup',e=>{ if(e.button===0)firing=false; if(e.button===2)scoping=false;});
 addEventListener('contextmenu',e=>{if(GAME.state==='play'||GAME.state==='bonus')e.preventDefault();});
 
@@ -785,7 +785,7 @@ addEventListener('touchend',e=>{for(const t of e.changedTouches){
 }});
 const lookpad=document.getElementById('lookpad'); let lookId=null, lookLast={x:0,y:0};
 lookpad.addEventListener('touchstart',e=>{e.preventDefault();const t=e.changedTouches[0];lookId=t.identifier;lookLast={x:t.clientX,y:t.clientY};},{passive:false});
-document.getElementById('fireBtn').addEventListener('touchstart',e=>{e.preventDefault();firing=true;},{passive:false});
+document.getElementById('fireBtn').addEventListener('touchstart',e=>{e.preventDefault();firing=true;fireQueued=true;},{passive:false});
 document.getElementById('fireBtn').addEventListener('touchend',e=>{e.preventDefault();firing=false;},{passive:false});
 document.getElementById('jumpBtn').addEventListener('touchstart',e=>{e.preventDefault();jumpQueued=true;},{passive:false});
 document.getElementById('scopeBtn').addEventListener('touchstart',e=>{e.preventDefault();scoping=!scoping;},{passive:false});
@@ -1192,7 +1192,7 @@ function updateLocal(dt){
   resolveCollision(p);
   const gh=groundHeight(p);
   if(p.pos.y<=gh){p.pos.y=gh;p.vel.y=0;p.onGround=true;} else p.onGround=false;
-  if(firing)shoot(p);
+  if(firing||fireQueued){ shoot(p); fireQueued=false; }
 }
 
 let respawnShown=false;
@@ -1374,13 +1374,18 @@ function objectiveTick(dt){
       let a=0,b=0;
       for(const p of GAME.players){ if(!p.alive)continue;
         if(p.pos.distanceTo(z.pos)<5){ if(p.team==='A')a++; else b++; } }
-      if(a>b)z.owner='A'; else if(b>a)z.owner='B';
-      const col = z.owner==='A'?TEAM_COLORS.A: z.owner==='B'?TEAM_COLORS.B:0x666666;
+      // presence-based: only the team with MORE bodies in the ring holds and scores.
+      // a tie (including an empty ring) is contested → nobody scores. no ghost points
+      // for a team that captured the zone earlier and then walked away.
+      let holder=null;
+      if(a>b)holder='A'; else if(b>a)holder='B';
+      z.owner=holder;
+      const col = holder==='A'?TEAM_COLORS.A: holder==='B'?TEAM_COLORS.B:0x666666;
       z.mesh.material.color.setHex(col); z.pad.material.color.setHex(col);
-      if(z.owner==='A')GAME.scoreA+=dt*1.2; else if(z.owner==='B')GAME.scoreB+=dt*1.2;
+      if(holder==='A')GAME.scoreA+=dt*1.2; else if(holder==='B')GAME.scoreB+=dt*1.2;
     }
-    GAME.scoreA=Math.floor(GAME.scoreA*10)/10; // keep tidy
-    if(Math.random()<0.05){updateScoreboard();checkWin();}
+    GAME.scoreA=Math.round(GAME.scoreA*10)/10; GAME.scoreB=Math.round(GAME.scoreB*10)/10;
+    updateScoreboard(); checkWin();
   }
 }
 function centerFlash(txt){ centerMsg(txt,''); setTimeout(hideCenter,900); }
@@ -1609,7 +1614,7 @@ function bonusComplete(){
 function updateBonus(dt){
   const t=performance.now()/1000;
   for(const tg of BONUS.targets){ if(tg.moving){ tg.mesh.position.x = tg.baseX + Math.sin(t*tg.speed+tg.phase)*tg.range; } }
-  if(firing)bonusShoot();
+  if(firing||fireQueued){ bonusShoot(); fireQueued=false; }
   // local look/move handled by updateLocal-lite
   const p=GAME.local; // allow slight strafing on firing line
   let fx=0,fz=0;
