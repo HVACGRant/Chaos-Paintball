@@ -240,7 +240,7 @@
 
   <div id="center-msg">ROUND 1<div id="center-sub">FIGHT</div></div>
   <div id="respawn"><div class="big">3</div><div style="color:var(--dim)">RESPAWNING</div></div>
-  <div id="esc-tip">↑↓ move · ←→ turn · SPACE / click: fire · F: jump · right-click: scope · 1/2/3: guns · V: view · SHIFT: sprint · ESC: pause</div>
+  <div id="esc-tip">↑↓ move · ←→ turn · SPACE / click: fire · F: jump · C: crouch · right-click: scope · 1/2/3: guns · V: view · SHIFT: sprint · ESC: pause</div>
 </div>
 
 <!-- ===================== TOUCH ===================== -->
@@ -278,11 +278,37 @@
 </div>
 
 <script type="importmap">
-{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.180.0/three.module.min.js" } }
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+} }
 </script>
 
 <script type="module">
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+
+/* ============================================================
+   Rigged character model (real human, mixamo skeleton + clips).
+   Loaded once, cloned per player. If it fails, createAvatar
+   falls back to the procedural rig so the game still runs.
+   ============================================================ */
+const CHAR = {
+  ready:false, failed:false, gltf:null,
+  url:'https://raw.githubusercontent.com/mrdoob/three.js/r180/examples/models/gltf/Soldier.glb',
+  faceOffset:0,   // <-- if soldiers face/run BACKWARD, change this to Math.PI
+};
+(function preloadCharacter(){
+  new GLTFLoader().load(CHAR.url, (gltf)=>{
+    CHAR.gltf=gltf; CHAR.ready=true;
+    const b=document.getElementById('startBtn'); if(b){ b.textContent='DEPLOY ▸'; b.disabled=false; }
+  }, undefined, (err)=>{
+    console.warn('Character model failed, using procedural fallback:', err);
+    CHAR.failed=true;
+    const b=document.getElementById('startBtn'); if(b){ b.textContent='DEPLOY ▸'; b.disabled=false; }
+  });
+})();
 
 /* ============================================================
    CHAOS ARENA — paintball. Single file, Three.js.
@@ -412,70 +438,156 @@ function buildArena(){
 // ============================================================
 function makeMat(color,rough=0.55,metal=0.1){return new THREE.MeshStandardMaterial({color,roughness:rough,metalness:metal});}
 
+// ---- weapon builder: three distinct silhouettes, +Z = muzzle forward ----
+// gunIdx: 0 pistol, 1 shotgun, 2 sniper. Used on the avatar's hands AND the FP viewmodel.
+function buildWeapon(idx,teamColor){
+  const w=new THREE.Group();
+  const blk=makeMat(0x12161e,0.5,0.35);
+  const mtl=makeMat(0x2a2f3a,0.4,0.6);
+  const accent=makeMat(teamColor,0.45,0.2);
+  if(idx===1){ // SHOTGUN — double barrel, pump, stock
+    const b1=new THREE.Mesh(new THREE.CylinderGeometry(0.035,0.035,0.5,10),blk);
+    b1.rotation.x=Math.PI/2; b1.position.set(-0.045,0,0.28);
+    const b2=b1.clone(); b2.position.x=0.045;
+    const pump=new THREE.Mesh(new THREE.BoxGeometry(0.13,0.07,0.16),accent); pump.position.set(0,-0.05,0.18);
+    const body=new THREE.Mesh(new THREE.BoxGeometry(0.11,0.11,0.22),blk); body.position.set(0,0,0.02);
+    const stock=new THREE.Mesh(new THREE.BoxGeometry(0.07,0.11,0.24),mtl); stock.position.set(0,-0.04,-0.16); stock.rotation.x=0.2;
+    w.add(b1,b2,pump,body,stock);
+  } else if(idx===2){ // SNIPER — long body, scope, bipod
+    const body=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.11,0.44),blk); body.position.z=0.05;
+    const barrel=new THREE.Mesh(new THREE.CylinderGeometry(0.028,0.028,0.72,10),mtl);
+    barrel.rotation.x=Math.PI/2; barrel.position.z=0.52;
+    const scope=new THREE.Mesh(new THREE.CylinderGeometry(0.042,0.042,0.24,12),blk);
+    scope.rotation.x=Math.PI/2; scope.position.set(0,0.12,0.07);
+    const lens=new THREE.Mesh(new THREE.CylinderGeometry(0.044,0.044,0.02,12),accent);
+    lens.rotation.x=Math.PI/2; lens.position.set(0,0.12,0.20);
+    const stock=new THREE.Mesh(new THREE.BoxGeometry(0.06,0.12,0.26),mtl); stock.position.set(0,-0.02,-0.22); stock.rotation.x=0.14;
+    const bipL=new THREE.Mesh(new THREE.CylinderGeometry(0.012,0.012,0.28,6),mtl);
+    bipL.position.set(-0.07,-0.13,0.54); bipL.rotation.z=0.42;
+    const bipR=bipL.clone(); bipR.position.x=0.07; bipR.rotation.z=-0.42;
+    w.add(body,barrel,scope,lens,stock,bipL,bipR);
+  } else { // PISTOL — stubby marker w/ hopper
+    const body=new THREE.Mesh(new THREE.BoxGeometry(0.09,0.12,0.26),blk); body.position.z=0.02;
+    const barrel=new THREE.Mesh(new THREE.CylinderGeometry(0.032,0.032,0.36,10),mtl);
+    barrel.rotation.x=Math.PI/2; barrel.position.z=0.28;
+    const hopper=new THREE.Mesh(new THREE.SphereGeometry(0.07,14,12),accent); hopper.position.set(0,0.12,0.02);
+    const grip=new THREE.Mesh(new THREE.BoxGeometry(0.06,0.15,0.07),mtl); grip.position.set(0,-0.12,-0.06); grip.rotation.x=0.22;
+    w.add(body,barrel,hopper,grip);
+  }
+  w.traverse(o=>{if(o.isMesh)o.castShadow=true;});
+  return w;
+}
+
+// ---- real character: clone the rigged model, auto-fit, team-tint, hold weapon ----
 function createAvatar(teamColor){
+  if(!CHAR.ready || !CHAR.gltf) return createAvatarFallback(teamColor);
+  const outer=new THREE.Group();
+  const model=SkeletonUtils.clone(CHAR.gltf.scene);
+  // auto-fit to ~1.85 tall, feet on the ground
+  let box=new THREE.Box3().setFromObject(model);
+  const s=1.85/Math.max(0.001,(box.max.y-box.min.y));
+  model.scale.setScalar(s);
+  box=new THREE.Box3().setFromObject(model);
+  model.position.y=-box.min.y;
+  model.rotation.y=CHAR.faceOffset;
+  outer.add(model);
+  // shadows + per-team visor glow (clone only the visor material so teams differ)
+  model.traverse(o=>{
+    if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.frustumCulled=false;
+      if(/visor/i.test(o.name) && o.material){ o.material=o.material.clone();
+        o.material.emissive=new THREE.Color(teamColor); o.material.emissiveIntensity=0.7; }
+    }
+  });
+  // team ring on the deck — clean way to read teams without recoloring the body
+  const ring=new THREE.Mesh(new THREE.RingGeometry(0.34,0.48,28),
+    new THREE.MeshBasicMaterial({color:teamColor,transparent:true,opacity:0.85,side:THREE.DoubleSide,depthWrite:false}));
+  ring.rotation.x=-Math.PI/2; ring.position.y=0.03; outer.add(ring);
+  // weapon held at chest-ready (front-center, always aims forward)
+  const weaponMount=new THREE.Group(); weaponMount.position.set(0.14,1.12,0.30); weaponMount.rotation.y=-0.12; outer.add(weaponMount);
+  // animation
+  const mixer=new THREE.AnimationMixer(model);
+  const actions={};
+  for(const clip of CHAR.gltf.animations){ actions[clip.name.toLowerCase()]=mixer.clipAction(clip); }
+  if(actions.idle){ actions.idle.play(); }
+  outer.userData={isModel:true, model, mixer, actions, current:'idle', weaponMount, teamColor, shownGun:-1, crouchK:0};
+  return outer;
+}
+
+function fadeToAction(u,name,dur=0.18){
+  if(u.current===name || !u.actions[name]) return;
+  const to=u.actions[name], from=u.actions[u.current];
+  to.enabled=true; to.setEffectiveTimeScale(1); to.setEffectiveWeight(1); to.reset().play();
+  if(from) from.crossFadeTo(to,dur,false);
+  u.current=name;
+}
+
+// ---- procedural fallback rig (lathe body, ball joints, air tank) ----
+function createAvatarFallback(teamColor){
   const g=new THREE.Group();
+  const suit=makeMat(teamColor,0.5,0.12);
   const skin=makeMat(0x2a2f3c,0.7);
-  const suit=makeMat(teamColor,0.5,0.15);
   const dark=makeMat(0x14181f,0.6);
-  const glass=new THREE.MeshStandardMaterial({color:0x0a0d12,roughness:0.15,metalness:0.6,emissive:teamColor,emissiveIntensity:0.25});
+  const rubber=makeMat(0x0c0f15,0.7);
+  const metal=makeMat(0x3a4150,0.35,0.7);
+  const glass=new THREE.MeshStandardMaterial({color:0x0a0d12,roughness:0.15,metalness:0.6,emissive:teamColor,emissiveIntensity:0.3});
 
-  // torso (rounded capsule)
-  const torso=new THREE.Mesh(new THREE.CapsuleGeometry(0.30,0.55,8,18),suit);
-  torso.position.y=1.18; torso.castShadow=true; g.add(torso);
-  // chest plate accent
-  const chest=new THREE.Mesh(new THREE.CapsuleGeometry(0.26,0.30,6,16),dark);
-  chest.position.y=1.30; chest.scale.z=0.7; g.add(chest);
-  // hips
-  const hips=new THREE.Mesh(new THREE.SphereGeometry(0.27,18,14),dark);
-  hips.position.y=0.86; hips.scale.y=0.7; g.add(hips);
-  // neck
-  const neck=new THREE.Mesh(new THREE.CylinderGeometry(0.10,0.12,0.14,12),skin);
-  neck.position.y=1.55; g.add(neck);
-  // head
-  const head=new THREE.Mesh(new THREE.SphereGeometry(0.215,22,20),skin);
-  head.position.y=1.72; head.castShadow=true; g.add(head);
-  // helmet
-  const helmet=new THREE.Mesh(new THREE.SphereGeometry(0.235,22,18,0,Math.PI*2,0,Math.PI*0.62),suit);
-  helmet.position.y=1.74; g.add(helmet);
-  // visor
-  const visor=new THREE.Mesh(new THREE.SphereGeometry(0.205,20,16,Math.PI*0.15,Math.PI*0.7,Math.PI*0.42,Math.PI*0.32),glass);
-  visor.position.set(0,1.70,0.02); visor.rotation.y=Math.PI; g.add(visor);
+  // torso — lathe-spun athletic taper (waist 0.88 → shoulders 1.51)
+  const prof=[[0.02,0.00],[0.22,0.04],[0.28,0.18],[0.30,0.34],[0.27,0.48],[0.18,0.58],[0.08,0.62],[0.02,0.63]]
+    .map(p=>new THREE.Vector2(p[0],p[1]));
+  const torso=new THREE.Mesh(new THREE.LatheGeometry(prof,20),suit);
+  torso.position.y=0.88; torso.castShadow=true; g.add(torso);
+  const chest=new THREE.Mesh(new THREE.CapsuleGeometry(0.24,0.26,6,14),dark);
+  chest.position.set(0,1.30,0.10); chest.scale.z=0.55; g.add(chest);
+  const belt=new THREE.Mesh(new THREE.TorusGeometry(0.27,0.05,10,20),dark);
+  belt.rotation.x=Math.PI/2; belt.position.y=0.92; g.add(belt);
 
-  // arms (upper + fore as one capsule each, with shoulder ball)
+  // air tank + hose on the back
+  const tank=new THREE.Mesh(new THREE.CapsuleGeometry(0.10,0.30,8,14),metal);
+  tank.position.set(0,1.18,-0.30); tank.castShadow=true; g.add(tank);
+  const tankCap=new THREE.Mesh(new THREE.CylinderGeometry(0.06,0.06,0.06,10),makeMat(teamColor,0.45,0.2));
+  tankCap.position.set(0,1.42,-0.30); g.add(tankCap);
+  const hoseCurve=new THREE.CatmullRomCurve3([
+    new THREE.Vector3(0,1.40,-0.30),new THREE.Vector3(0.16,1.46,-0.16),
+    new THREE.Vector3(0.20,1.55,0.02),new THREE.Vector3(0.10,1.60,0.16)]);
+  const hose=new THREE.Mesh(new THREE.TubeGeometry(hoseCurve,16,0.022,6,false),rubber); g.add(hose);
+
+  // neck + head pivot (head pitches with aim) — helmet + curved visor
+  const neck=new THREE.Mesh(new THREE.CylinderGeometry(0.09,0.11,0.12,12),skin); neck.position.y=1.52; g.add(neck);
+  const headPivot=new THREE.Group(); headPivot.position.y=1.70; g.add(headPivot);
+  const head=new THREE.Mesh(new THREE.SphereGeometry(0.205,22,20),skin); head.castShadow=true; headPivot.add(head);
+  const helmet=new THREE.Mesh(new THREE.SphereGeometry(0.225,22,18,0,Math.PI*2,0,Math.PI*0.62),suit);
+  helmet.position.y=0.03; headPivot.add(helmet);
+  const visor=new THREE.Mesh(new THREE.SphereGeometry(0.20,20,16,Math.PI*0.16,Math.PI*0.68,Math.PI*0.42,Math.PI*0.34),glass);
+  visor.position.set(0,-0.02,0.02); visor.rotation.y=Math.PI; headPivot.add(visor);
+
+  // ball-jointed arms (pivot at shoulder)
   function arm(side){
-    const a=new THREE.Group();
-    const sh=new THREE.Mesh(new THREE.SphereGeometry(0.13,14,12),suit); sh.position.y=1.42; a.add(sh);
-    const limb=new THREE.Mesh(new THREE.CapsuleGeometry(0.095,0.62,6,14),suit);
-    limb.position.y=1.10; limb.castShadow=true; a.add(limb);
-    const hand=new THREE.Mesh(new THREE.SphereGeometry(0.10,12,10),dark); hand.position.y=0.74; a.add(hand);
-    a.position.x=side*0.36; a.userData.pivotY=1.42;
+    const a=new THREE.Group(); a.position.set(side*0.30,1.40,0);
+    const sh=new THREE.Mesh(new THREE.SphereGeometry(0.12,14,12),suit); a.add(sh);
+    const upper=new THREE.Mesh(new THREE.CapsuleGeometry(0.075,0.30,6,12),suit); upper.position.y=-0.22; upper.castShadow=true; a.add(upper);
+    const elbow=new THREE.Mesh(new THREE.SphereGeometry(0.075,12,10),dark); elbow.position.y=-0.40; a.add(elbow);
+    const fore=new THREE.Mesh(new THREE.CapsuleGeometry(0.065,0.26,6,12),dark); fore.position.y=-0.56; a.add(fore);
+    const glove=new THREE.Mesh(new THREE.SphereGeometry(0.085,12,10),rubber); glove.position.y=-0.74; glove.scale.set(1,0.9,1.1); a.add(glove);
     g.add(a); return a;
   }
-  const armL=arm(-1), armR=arm(1);
-
-  // legs
+  // ball-jointed legs (pivot at hip)
   function leg(side){
-    const l=new THREE.Group();
-    const limb=new THREE.Mesh(new THREE.CapsuleGeometry(0.13,0.66,6,14),dark);
-    limb.position.y=0.46; limb.castShadow=true; l.add(limb);
-    const boot=new THREE.Mesh(new THREE.CapsuleGeometry(0.135,0.12,6,12),makeMat(teamColor,0.5));
-    boot.position.set(0,0.10,0.05); boot.rotation.x=Math.PI/2; l.add(boot);
-    l.position.set(side*0.16,0.82,0);
+    const l=new THREE.Group(); l.position.set(side*0.13,0.84,0);
+    const hip=new THREE.Mesh(new THREE.SphereGeometry(0.11,12,10),dark); l.add(hip);
+    const thigh=new THREE.Mesh(new THREE.CapsuleGeometry(0.105,0.30,6,12),dark); thigh.position.y=-0.22; thigh.castShadow=true; l.add(thigh);
+    const knee=new THREE.Mesh(new THREE.SphereGeometry(0.095,12,10),dark); knee.position.y=-0.40; l.add(knee);
+    const shin=new THREE.Mesh(new THREE.CapsuleGeometry(0.09,0.28,6,12),dark); shin.position.y=-0.56; l.add(shin);
+    const boot=new THREE.Mesh(new THREE.BoxGeometry(0.16,0.12,0.30),suit); boot.position.set(0,-0.76,0.06); boot.castShadow=true; l.add(boot);
     g.add(l); return l;
   }
-  const legL=leg(-1), legR=leg(1);
+  const armL=arm(-1), armR=arm(1), legL=leg(-1), legR=leg(1);
+  const baseArmL=-1.2, baseArmR=-1.2;          // default two-handed forward hold
+  armL.rotation.x=baseArmL; armR.rotation.x=baseArmR; armL.rotation.z=0.22; armR.rotation.z=-0.22;
 
-  // paintball marker in right hand
-  const gun=new THREE.Group();
-  const body=new THREE.Mesh(new THREE.BoxGeometry(0.10,0.14,0.5),makeMat(0x1c2230,0.5,0.3));
-  const barrel=new THREE.Mesh(new THREE.CylinderGeometry(0.04,0.04,0.5,12),makeMat(0x0e1118,0.4,0.4));
-  barrel.rotation.x=Math.PI/2; barrel.position.z=0.4;
-  const hopper=new THREE.Mesh(new THREE.SphereGeometry(0.09,14,12),makeMat(teamColor,0.4)); hopper.position.set(0,0.13,0.05);
-  gun.add(body,barrel,hopper); gun.position.set(0.42,1.0,0.18);
-  g.add(gun);
+  // weapon mount (two-handed, front-center); populated by animateAvatar on gun change
+  const weaponMount=new THREE.Group(); weaponMount.position.set(0,1.06,0.32); g.add(weaponMount);
 
-  g.traverse(o=>{if(o.isMesh)o.castShadow=true;});
-  g.userData={armL,armR,legL,legR,head,gun};
+  g.userData={armL,armR,legL,legR,headPivot,weaponMount,teamColor,baseArmL,baseArmR,shownGun:-1,crouchK:0};
   return g;
 }
 
@@ -648,21 +760,27 @@ function switchGun(i){ if(!GAME.local)return; GAME.local.gunIdx=i; updateGunHud(
   document.querySelectorAll('.gunpick').forEach(b=>b.classList.toggle('on',+b.dataset.g===i));}
 function updateGunHud(){ const g=GUNS[GAME.local.gunIdx];
   document.getElementById('gunName').textContent=g.name;
-  document.getElementById('ammoHud').textContent = CFG.ammo<0?'∞':GAME.local.ammo;}
+  document.getElementById('ammoHud').textContent = CFG.ammo<0?'∞':GAME.local.ammo;
+  setViewModel(GAME.local.gunIdx);}
 
 // ============================================================
 //  VIEW / CAMERA
 // ============================================================
 function toggleView(){ CFG.view = CFG.view==='fps'?'tps':'fps'; }
 const viewModel=new THREE.Group(); camera.add(viewModel); scene.add(camera);
-(function buildViewModel(){
-  const body=new THREE.Mesh(new THREE.BoxGeometry(0.08,0.12,0.42),makeMat(0x1c2230,0.5,0.3));
-  const barrel=new THREE.Mesh(new THREE.CylinderGeometry(0.03,0.03,0.4,10),makeMat(0x0e1118,0.4,0.4));
-  barrel.rotation.x=Math.PI/2; barrel.position.z=-0.35;
-  const hopper=new THREE.Mesh(new THREE.SphereGeometry(0.07,12,10),makeMat(0xff5a1f,0.4)); hopper.position.set(0,0.10,-0.05);
-  viewModel.add(body,barrel,hopper);
-  viewModel.position.set(0.22,-0.20,-0.45);
-})();
+viewModel.position.set(0.22,-0.20,-0.45); viewModel.userData.shown=-1;
+function setViewModel(idx){
+  if(viewModel.userData.shown===idx) return;
+  while(viewModel.children.length) viewModel.remove(viewModel.children[0]);
+  const col = GAME.local? GAME.local.color : TEAM_COLORS.A;
+  const w=buildWeapon(idx,col);
+  w.rotation.y=Math.PI;            // muzzle faces -Z (camera forward) in view space
+  w.scale.setScalar(1.15);
+  w.traverse(o=>{if(o.isMesh)o.castShadow=false;});
+  viewModel.add(w);
+  viewModel.userData.shown=idx;
+}
+setViewModel(CFG.gun);
 
 // ============================================================
 //  SHOOTING
@@ -966,8 +1084,9 @@ function updateLocal(dt){
     if(keys['KeyA'])fx-=1; if(keys['KeyD'])fx+=1;
   } else { fx=move.x; fz=-move.y; }
   const sprinting=(keys['ShiftLeft']||keys['ShiftRight']);
-  const sprint=sprinting?1.7:1;
-  const speed=6.2*sprint;
+  p.crouching = !isTouch && (keys['KeyC']||keys['ControlLeft']);
+  const sprint=sprinting&&!p.crouching?1.7:1;
+  const speed=6.2*sprint*(p.crouching?0.5:1);
   // direction relative to yaw
   const sin=Math.sin(p.yaw),cos=Math.cos(p.yaw);
   let dx=(fx*cos+fz*sin), dz=(fz*cos-fx*sin);
@@ -1182,21 +1301,68 @@ function centerFlash(txt){ centerMsg(txt,''); setTimeout(hideCenter,900); }
 // ============================================================
 function animateAvatar(p,dt){
   const u=p.group.userData;
-  p.group.position.set(p.pos.x,p.pos.y,p.pos.z);
+
+  if(u.isModel){
+    u.mixer.update(dt);
+    u.crouchK += ((p.crouching?1:0)-u.crouchK)*Math.min(1,dt*10);
+    p.group.position.set(p.pos.x,p.pos.y,p.pos.z);
+    p.group.rotation.y=p.yaw;
+    const sp=Math.hypot(p.vel.x,p.vel.z);
+    fadeToAction(u, p.alive ? (sp>7?'run':sp>0.4?'walk':'idle') : 'idle');
+    if(u.shownGun!==p.gunIdx){
+      while(u.weaponMount.children.length) u.weaponMount.remove(u.weaponMount.children[0]);
+      u.weaponMount.add(buildWeapon(p.gunIdx,u.teamColor));
+      u.shownGun=p.gunIdx;
+    }
+    if(p.hpGroup){
+      if(p.alive && p!==GAME.local){
+        p.hpGroup.visible=true;
+        p.hpGroup.position.set(p.pos.x,p.pos.y+2.15,p.pos.z);
+        p.hpGroup.quaternion.copy(camera.quaternion);
+        const s=Math.max(0,p.hp)/HP_MAX;
+        p.hpFill.scale.x=s; p.hpFill.position.x=-(1-s)*0.5;
+        p.hpFill.material.color.setHex(p.hp<30?0xff4d6d:p.hp<60?0xffb347:0x3ddc84);
+      } else p.hpGroup.visible=false;
+    }
+    return;
+  }
+
+  // crouch smoothing (drops the whole body + bends knees)
+  const targetCrouch = p.crouching?1:0;
+  u.crouchK += (targetCrouch-u.crouchK)*Math.min(1,dt*10);
+  p.group.position.set(p.pos.x, p.pos.y - u.crouchK*0.34, p.pos.z);
   p.group.rotation.y=p.yaw;
+
+  // hot-swap the held weapon when the equipped gun changes (local switch or bot reroll)
+  if(u.shownGun!==p.gunIdx){
+    while(u.weaponMount.children.length) u.weaponMount.remove(u.weaponMount.children[0]);
+    u.weaponMount.add(buildWeapon(p.gunIdx,u.teamColor));
+    u.shownGun=p.gunIdx;
+  }
+
   const sp=Math.hypot(p.vel.x,p.vel.z);
-  if(sp>0.3){ p.walkPhase+=dt*sp*1.6;
-    const s=Math.sin(p.walkPhase)*0.5;
+  if(sp>0.3){ p.walkPhase+=dt*sp*1.5;
+    const s=Math.sin(p.walkPhase)*0.5*(1-u.crouchK*0.5);
     u.legL.rotation.x=s; u.legR.rotation.x=-s;
-    u.armL.rotation.x=-s*0.6; u.armR.rotation.x=s*0.6;
-  } else { u.legL.rotation.x*=0.8;u.legR.rotation.x*=0.8;u.armL.rotation.x*=0.8;u.armR.rotation.x*=0.8; }
-  // head pitch
-  u.head.rotation.x=-p.pitch*0.5;
-  // floating health bar (billboarded to camera), hidden for local + dead
+    // arms keep the two-handed hold, just a subtle counter-sway
+    u.armL.rotation.x=u.baseArmL + Math.sin(p.walkPhase+Math.PI)*0.07;
+    u.armR.rotation.x=u.baseArmR + Math.sin(p.walkPhase)*0.05;
+  } else {
+    u.legL.rotation.x*=0.8; u.legR.rotation.x*=0.8;
+    u.armL.rotation.x += (u.baseArmL-u.armL.rotation.x)*0.2;
+    u.armR.rotation.x += (u.baseArmR-u.armR.rotation.x)*0.2;
+  }
+  // knee fold while crouched
+  const kb=u.crouchK*0.7;
+  u.legL.rotation.x += kb; u.legR.rotation.x += kb;
+  // head tracks aim pitch
+  u.headPivot.rotation.x=-p.pitch*0.4;
+
+  // floating health bar (billboarded), hidden for local + dead
   if(p.hpGroup){
     if(p.alive && p!==GAME.local){
       p.hpGroup.visible=true;
-      p.hpGroup.position.set(p.pos.x,p.pos.y+2.25,p.pos.z);
+      p.hpGroup.position.set(p.pos.x,p.pos.y+2.25 - u.crouchK*0.34,p.pos.z);
       p.hpGroup.quaternion.copy(camera.quaternion);
       const s=Math.max(0,p.hp)/HP_MAX;
       p.hpFill.scale.x=s; p.hpFill.position.x=-(1-s)*0.5;
@@ -1217,7 +1383,8 @@ function updateCamera(dt){
 
   if(CFG.view==='fps'){
     p.group.visible=false;
-    camera.position.set(p.pos.x,p.pos.y+1.5,p.pos.z);
+    const ck=p.group.userData.crouchK||0;
+    camera.position.set(p.pos.x,p.pos.y+1.5-ck*0.34,p.pos.z);
     camera.quaternion.setFromEuler(new THREE.Euler(p.pitch,p.yaw,0,'YXZ'));
     viewModel.visible = p.alive && !scoping;
   } else {
@@ -1385,6 +1552,11 @@ function startGame(){
   startRound();
 }
 document.getElementById('startBtn').addEventListener('click',startGame);
+// hold Deploy until the character model is loaded (or has failed → fallback)
+(function gateDeploy(){
+  const b=document.getElementById('startBtn');
+  if(!CHAR.ready && !CHAR.failed){ b.disabled=true; b.textContent='LOADING FIGHTERS…'; }
+})();
 
 // single render loop (runs during menu as idle backdrop, then gameplay)
 GAME.started=true;
