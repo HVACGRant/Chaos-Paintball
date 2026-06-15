@@ -178,6 +178,16 @@
       </div>
 
       <div class="field">
+        <label>Look Sensitivity</label>
+        <div class="opts" id="sensOpts">
+          <div class="opt" data-v="0.45">Slow</div>
+          <div class="opt on" data-v="0.8">Normal</div>
+          <div class="opt" data-v="1.3">Fast</div>
+        </div>
+        <div class="mini">Lower = easier to aim. Start Slow if it feels twitchy.</div>
+      </div>
+
+      <div class="field">
         <label>Starting Gun</label>
         <div class="opts" id="gunOpts">
           <div class="opt on" data-v="0">A · Pistol +1</div>
@@ -329,7 +339,7 @@ const CHAR = {
 
 // ---------- config gathered from menu ----------
 const CFG = {
-  mode:'ffa', view:'fps', players:10, gun:0, ammo:-1, winScore:100, room:'----'
+  mode:'ffa', view:'fps', players:10, gun:0, ammo:-1, winScore:100, room:'----', sens:0.8
 };
 const HP_MAX=100;
 const GUNS = [
@@ -349,6 +359,7 @@ function bindOpts(id, key, cast=(x)=>x){
 }
 bindOpts('modeOpts','mode');
 bindOpts('viewOpts','view');
+bindOpts('sensOpts','sens',Number);
 bindOpts('gunOpts','gun',Number);
 bindOpts('ammoOpts','ammo',Number);
 bindOpts('scoreOpts','winScore',Number);
@@ -736,7 +747,7 @@ renderer.domElement.addEventListener('click',()=>{
 document.addEventListener('pointerlockchange',()=>{pointerLocked=document.pointerLockElement===renderer.domElement;});
 addEventListener('mousemove',e=>{
   if(!pointerLocked||!GAME.local)return;
-  const s=scoping?0.0009:0.0022;
+  const s=(scoping?0.0006:0.0015)*CFG.sens;
   GAME.local.yaw -= e.movementX*s;
   GAME.local.pitch -= e.movementY*s;
   GAME.local.pitch=Math.max(-1.4,Math.min(1.4,GAME.local.pitch));
@@ -755,7 +766,7 @@ addEventListener('touchmove',e=>{for(const t of e.changedTouches){
   if(t.identifier===stickId){let dx=t.clientX-stickCx,dy=t.clientY-stickCy;const m=Math.hypot(dx,dy),max=48;
     if(m>max){dx*=max/m;dy*=max/m;}knob.style.transform=`translate(${dx}px,${dy}px)`;move.x=dx/max;move.y=dy/max;}
   if(t.identifier===lookId){const ndx=t.clientX-lookLast.x,ndy=t.clientY-lookLast.y;lookLast={x:t.clientX,y:t.clientY};
-    const s=scoping?0.0016:0.004;GAME.local.yaw-=ndx*s;GAME.local.pitch-=ndy*s;
+    const s=(scoping?0.0011:0.0028)*CFG.sens;GAME.local.yaw-=ndx*s;GAME.local.pitch-=ndy*s;
     GAME.local.pitch=Math.max(-1.4,Math.min(1.4,GAME.local.pitch));}
 }},{passive:false});
 addEventListener('touchend',e=>{for(const t of e.changedTouches){
@@ -1092,7 +1103,7 @@ function updateLocal(dt){
   let fx=0,fz=0;
   if(!isTouch){
     // arrow keys: Up/Down drive, Left/Right turn — playable with one hand, no mouse needed
-    const turn=2.6;
+    const turn=2.2*CFG.sens;
     if(keys['ArrowLeft'])  p.yaw += turn*dt;
     if(keys['ArrowRight']) p.yaw -= turn*dt;
     if(keys['KeyW']||keys['ArrowUp'])   fz+=1;
