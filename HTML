@@ -100,6 +100,16 @@
   #fireBtn{right:22px;bottom:40px;width:96px;height:96px;font-size:13px;background:rgba(255,40,80,.55);}
   #jumpBtn{right:130px;bottom:60px;width:64px;height:64px;font-size:12px;}
   #scopeBtn{right:30px;bottom:150px;width:60px;height:60px;font-size:11px;}
+  #crouchBtn{right:110px;bottom:140px;width:58px;height:58px;font-size:10px;}
+  #crouchBtn.on{background:var(--orange);color:#1a0b00;}
+  #scopeOverlay{position:absolute;inset:0;display:none;pointer-events:none;z-index:11;
+    background:radial-gradient(circle at 50% 50%, rgba(0,0,0,0) 0 25%, rgba(0,0,0,.55) 30%, rgba(0,0,0,.97) 36%);}
+  #scopeOverlay::before{content:"";position:absolute;left:50%;top:0;width:1px;height:100%;background:rgba(255,255,255,.18);}
+  #scopeOverlay::after{content:"";position:absolute;top:50%;left:0;height:1px;width:100%;background:rgba(255,255,255,.18);}
+  #scopeRing{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:60vmin;height:60vmin;border-radius:50%;
+    border:2px solid rgba(0,0,0,.95);box-shadow:0 0 0 2px rgba(34,211,238,.4) inset;}
+  #scopeDot{position:absolute;left:50%;top:50%;transform:translate(-50%,-50%);width:6px;height:6px;border-radius:50%;
+    background:var(--cyan);box-shadow:0 0 8px var(--cyan);}
   #gunBtns{position:absolute;right:22px;top:70px;display:flex;flex-direction:column;gap:8px;pointer-events:auto;}
   .gunpick{width:48px;height:48px;border-radius:11px;border:1px solid var(--line);background:rgba(20,25,36,.7);
     color:#fff;font-weight:900;font-size:18px;display:grid;place-items:center;}
@@ -218,6 +228,7 @@
   <div id="cross"></div>
   <div id="hitflash"></div>
   <div id="splat">💥</div>
+  <div id="scopeOverlay"><div id="scopeRing"></div><div id="scopeDot"></div></div>
 
   <div class="hud-tl" id="scoreboard">
     <div class="pill" id="teamA"><span class="k">Orange</span><span class="v">0</span></div>
@@ -255,6 +266,7 @@
   <div class="tbtn" id="fireBtn">FIRE</div>
   <div class="tbtn" id="jumpBtn">JUMP</div>
   <div class="tbtn" id="scopeBtn">SCOPE</div>
+  <div class="tbtn" id="crouchBtn">CROUCH</div>
 </div>
 
 <!-- ===================== BONUS HUD ===================== -->
@@ -701,7 +713,7 @@ function makeZone(x,z,id){
 // ============================================================
 const keys={};
 const isTouch = ('ontouchstart' in window)||navigator.maxTouchPoints>0;
-let pointerLocked=false, scoping=false, firing=false, jumpQueued=false;
+let pointerLocked=false, scoping=false, firing=false, jumpQueued=false, touchCrouch=false;
 const move={x:0,y:0}; // touch joystick
 let lookActive=false;
 
@@ -711,6 +723,7 @@ addEventListener('keydown',e=>{keys[e.code]=true;
   if(e.code==='KeyF') jumpQueued=true;
   if(e.code==='Digit1')switchGun(0); if(e.code==='Digit2')switchGun(1); if(e.code==='Digit3')switchGun(2);
   if(e.code==='KeyV')toggleView();
+  if(e.code==='KeyQ'&&(GAME.state==='play'||GAME.state==='bonus'))scoping=!scoping;
   if(e.code==='Escape'&&GAME.state==='play')pauseGame();
 });
 addEventListener('keyup',e=>{keys[e.code]=false; if(e.code==='Space')firing=false;});
@@ -726,10 +739,10 @@ addEventListener('mousemove',e=>{
   GAME.local.pitch -= e.movementY*s;
   GAME.local.pitch=Math.max(-1.4,Math.min(1.4,GAME.local.pitch));
 });
-addEventListener('mousedown',e=>{ if((GAME.state!=='play'&&GAME.state!=='bonus')||isTouch)return;
+addEventListener('mousedown',e=>{ if(GAME.state!=='play'&&GAME.state!=='bonus')return;
   if(e.button===0)firing=true; if(e.button===2)scoping=true;});
 addEventListener('mouseup',e=>{ if(e.button===0)firing=false; if(e.button===2)scoping=false;});
-addEventListener('contextmenu',e=>{if(GAME.state==='play')e.preventDefault();});
+addEventListener('contextmenu',e=>{if(GAME.state==='play'||GAME.state==='bonus')e.preventDefault();});
 
 // ---- touch controls ----
 const stick=document.getElementById('stick'), knob=document.getElementById('knob');
@@ -753,6 +766,8 @@ document.getElementById('fireBtn').addEventListener('touchstart',e=>{e.preventDe
 document.getElementById('fireBtn').addEventListener('touchend',e=>{e.preventDefault();firing=false;},{passive:false});
 document.getElementById('jumpBtn').addEventListener('touchstart',e=>{e.preventDefault();jumpQueued=true;},{passive:false});
 document.getElementById('scopeBtn').addEventListener('touchstart',e=>{e.preventDefault();scoping=!scoping;},{passive:false});
+const crouchBtnEl=document.getElementById('crouchBtn');
+if(crouchBtnEl){ crouchBtnEl.addEventListener('touchstart',e=>{e.preventDefault();touchCrouch=!touchCrouch;crouchBtnEl.classList.toggle('on',touchCrouch);},{passive:false}); }
 document.querySelectorAll('.gunpick').forEach(b=>b.addEventListener('touchstart',e=>{e.preventDefault();switchGun(+b.dataset.g);},{passive:false}));
 
 function switchGun(i){ if(!GAME.local)return; GAME.local.gunIdx=i; updateGunHud();
@@ -799,7 +814,7 @@ function rayBlocked(from,to,pad=0.4){
 }
 
 function eyePos(p,out){return out.set(p.pos.x,p.pos.y+1.5,p.pos.z);}
-function bodyCenter(p,out){return out.set(p.pos.x,p.pos.y+1.1,p.pos.z);}
+function bodyCenter(p,out){const ck=(p.group&&p.group.userData.crouchK)||0;return out.set(p.pos.x,p.pos.y+1.1-ck*0.4,p.pos.z);}
 
 // ray-sphere
 function raySphere(o,dir,c,r){
@@ -1083,7 +1098,7 @@ function updateLocal(dt){
     if(keys['KeyA'])fx-=1; if(keys['KeyD'])fx+=1;
   } else { fx=move.x; fz=-move.y; }
   const sprinting=(keys['ShiftLeft']||keys['ShiftRight']);
-  p.crouching = !isTouch && (keys['KeyC']||keys['ControlLeft']);
+  p.crouching = (keys['KeyC']||keys['ControlLeft']||touchCrouch);
   const sprint=sprinting&&!p.crouching?1.7:1;
   const speed=6.2*sprint*(p.crouching?0.5:1);
   // direction relative to yaw
@@ -1372,6 +1387,10 @@ function animateAvatar(p,dt){
 
 function updateCamera(dt){
   const p=GAME.local;
+  // sniper scope overlay (clear feedback that you're zoomed)
+  const scoped = CFG.view==='fps' && scoping && p.alive && p.gunIdx===2;
+  const sov=document.getElementById('scopeOverlay'); if(sov) sov.style.display=scoped?'block':'none';
+  const cr=document.getElementById('cross'); if(cr) cr.style.visibility=scoped?'hidden':'visible';
   const fwd=forwardVec(p.yaw,p.pitch,new THREE.Vector3());
   // ADS / scope fov
   const g=GUNS[p.gunIdx];
@@ -1383,7 +1402,7 @@ function updateCamera(dt){
   if(CFG.view==='fps'){
     p.group.visible=false;
     const ck=p.group.userData.crouchK||0;
-    camera.position.set(p.pos.x,p.pos.y+1.5-ck*0.34,p.pos.z);
+    camera.position.set(p.pos.x,p.pos.y+1.5-ck*0.5,p.pos.z);
     camera.quaternion.setFromEuler(new THREE.Euler(p.pitch,p.yaw,0,'YXZ'));
     viewModel.visible = p.alive && !scoping;
   } else {
