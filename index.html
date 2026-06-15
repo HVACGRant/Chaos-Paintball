@@ -297,7 +297,7 @@ import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
 const CHAR = {
   ready:false, failed:false, gltf:null,
   url:'https://raw.githubusercontent.com/mrdoob/three.js/r180/examples/models/gltf/Soldier.glb',
-  faceOffset:0,   // <-- if soldiers face/run BACKWARD, change this to Math.PI
+  faceOffset:Math.PI,   // <-- if soldiers face/run BACKWARD, change this to 0
 };
 (function preloadCharacter(){
   new GLTFLoader().load(CHAR.url, (gltf)=>{
@@ -484,15 +484,12 @@ function createAvatar(teamColor){
   const outer=new THREE.Group();
   const model=SkeletonUtils.clone(CHAR.gltf.scene);
   // auto-fit to ~1.85 tall, feet on the ground
-  // auto-fit to ~1.85 tall, feet on the ground, centered on origin
+  outer.add(model);
+  // The model root already carries its own scale (cm->m) and stand-up rotation.
+  // Do NOT overwrite scale/rotation — only nudge translation so feet rest on y=0.
   model.updateMatrixWorld(true);
   const box=new THREE.Box3().setFromObject(model);
-  const h=Math.max(0.001,(box.max.y-box.min.y));
-  const s=1.85/h;
-  model.scale.setScalar(s);
-  model.position.set(-((box.min.x+box.max.x)/2)*s, -box.min.y*s, -((box.min.z+box.max.z)/2)*s);
-  model.rotation.y=CHAR.faceOffset;
-  outer.add(model);
+  if(isFinite(box.min.y)) model.position.y -= box.min.y;
   // shadows + per-team visor glow (clone only the visor material so teams differ)
   model.traverse(o=>{
     if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.frustumCulled=false;
@@ -1308,7 +1305,7 @@ function animateAvatar(p,dt){
     u.mixer.update(dt);
     u.crouchK += ((p.crouching?1:0)-u.crouchK)*Math.min(1,dt*10);
     p.group.position.set(p.pos.x,p.pos.y,p.pos.z);
-    p.group.rotation.y=p.yaw;
+    p.group.rotation.y=p.yaw+CHAR.faceOffset;
     const sp=Math.hypot(p.vel.x,p.vel.z);
     fadeToAction(u, p.alive ? (sp>7?'run':sp>0.4?'walk':'idle') : 'idle');
     if(u.shownGun!==p.gunIdx){
