@@ -331,14 +331,8 @@ const CHAR = {
   faceOffset:Math.PI,   // <-- if soldiers face/run BACKWARD, change this to 0
 };
 (function preloadCharacter(){
-  new GLTFLoader().load(CHAR.url, (gltf)=>{
-    CHAR.gltf=gltf; CHAR.ready=true;
-    const b=document.getElementById('startBtn'); if(b){ b.textContent='DEPLOY ▸'; b.disabled=false; }
-  }, undefined, (err)=>{
-    console.warn('Character model failed, using procedural fallback:', err);
-    CHAR.failed=true;
-    const b=document.getElementById('startBtn'); if(b){ b.textContent='DEPLOY ▸'; b.disabled=false; }
-  });
+  // procedural avatars are used directly — no external model download needed.
+  CHAR.failed=true;
 })();
 
 /* ============================================================
@@ -511,8 +505,13 @@ function buildWeapon(idx,teamColor){
   return w;
 }
 
-// ---- real character: clone the rigged model, auto-fit, team-tint, hold weapon ----
+// real character: USE THE APPROVED PROCEDURAL AVATARS.
+// The downloaded Soldier.glb faced backward (faceOffset guesswork), making every
+// fighter appear to shoot out of their back. The procedural rig faces forward by
+// construction and is the greenlit art direction, so we use it directly.
 function createAvatar(teamColor){
+  return createAvatarFallback(teamColor);
+  // ---- model path below intentionally unreachable ----
   if(!CHAR.ready || !CHAR.gltf) return createAvatarFallback(teamColor);
   const outer=new THREE.Group();
   // holder applies the facing offset to the MODEL only, so the weapon mount can live
@@ -1687,10 +1686,9 @@ function startGame(){
   startRound();
 }
 document.getElementById('startBtn').addEventListener('click',startGame);
-// hold Deploy until the character model is loaded (or has failed → fallback)
+// model no longer gates play (procedural avatars are used) — enable Deploy right away
 (function gateDeploy(){
-  const b=document.getElementById('startBtn');
-  if(!CHAR.ready && !CHAR.failed){ b.disabled=true; b.textContent='LOADING FIGHTERS…'; }
+  const b=document.getElementById('startBtn'); b.disabled=false; b.textContent='DEPLOY ▸';
 })();
 
 // single render loop (runs during menu as idle backdrop, then gameplay)
