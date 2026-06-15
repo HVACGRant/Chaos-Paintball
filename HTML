@@ -278,11 +278,37 @@
 </div>
 
 <script type="importmap">
-{ "imports": { "three": "https://cdnjs.cloudflare.com/ajax/libs/three.js/0.180.0/three.module.min.js" } }
+{ "imports": {
+  "three": "https://cdn.jsdelivr.net/npm/three@0.180.0/build/three.module.js",
+  "three/addons/": "https://cdn.jsdelivr.net/npm/three@0.180.0/examples/jsm/"
+} }
 </script>
 
 <script type="module">
 import * as THREE from 'three';
+import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+import * as SkeletonUtils from 'three/addons/utils/SkeletonUtils.js';
+
+/* ============================================================
+   Rigged character model (real human, mixamo skeleton + clips).
+   Loaded once, cloned per player. If it fails, createAvatar
+   falls back to the procedural rig so the game still runs.
+   ============================================================ */
+const CHAR = {
+  ready:false, failed:false, gltf:null,
+  url:'https://raw.githubusercontent.com/mrdoob/three.js/r180/examples/models/gltf/Soldier.glb',
+  faceOffset:0,   // <-- if soldiers face/run BACKWARD, change this to Math.PI
+};
+(function preloadCharacter(){
+  new GLTFLoader().load(CHAR.url, (gltf)=>{
+    CHAR.gltf=gltf; CHAR.ready=true;
+    const b=document.getElementById('startBtn'); if(b){ b.textContent='DEPLOY ▸'; b.disabled=false; }
+  }, undefined, (err)=>{
+    console.warn('Character model failed, using procedural fallback:', err);
+    CHAR.failed=true;
+    const b=document.getElementById('startBtn'); if(b){ b.textContent='DEPLOY ▸'; b.disabled=false; }
+  });
+})();
 
 /* ============================================================
    CHAOS ARENA — paintball. Single file, Three.js.
@@ -452,9 +478,51 @@ function buildWeapon(idx,teamColor){
   return w;
 }
 
-// ---- avatar: lathe-spun athletic body, ball-jointed limbs, air tank + hose,
-//      gloves/boots, two-handed weapon mount. The loadout-showcase look, baked in. ----
+// ---- real character: clone the rigged model, auto-fit, team-tint, hold weapon ----
 function createAvatar(teamColor){
+  if(!CHAR.ready || !CHAR.gltf) return createAvatarFallback(teamColor);
+  const outer=new THREE.Group();
+  const model=SkeletonUtils.clone(CHAR.gltf.scene);
+  // auto-fit to ~1.85 tall, feet on the ground
+  let box=new THREE.Box3().setFromObject(model);
+  const s=1.85/Math.max(0.001,(box.max.y-box.min.y));
+  model.scale.setScalar(s);
+  box=new THREE.Box3().setFromObject(model);
+  model.position.y=-box.min.y;
+  model.rotation.y=CHAR.faceOffset;
+  outer.add(model);
+  // shadows + per-team visor glow (clone only the visor material so teams differ)
+  model.traverse(o=>{
+    if(o.isMesh||o.isSkinnedMesh){ o.castShadow=true; o.frustumCulled=false;
+      if(/visor/i.test(o.name) && o.material){ o.material=o.material.clone();
+        o.material.emissive=new THREE.Color(teamColor); o.material.emissiveIntensity=0.7; }
+    }
+  });
+  // team ring on the deck — clean way to read teams without recoloring the body
+  const ring=new THREE.Mesh(new THREE.RingGeometry(0.34,0.48,28),
+    new THREE.MeshBasicMaterial({color:teamColor,transparent:true,opacity:0.85,side:THREE.DoubleSide,depthWrite:false}));
+  ring.rotation.x=-Math.PI/2; ring.position.y=0.03; outer.add(ring);
+  // weapon held at chest-ready (front-center, always aims forward)
+  const weaponMount=new THREE.Group(); weaponMount.position.set(0.14,1.12,0.30); weaponMount.rotation.y=-0.12; outer.add(weaponMount);
+  // animation
+  const mixer=new THREE.AnimationMixer(model);
+  const actions={};
+  for(const clip of CHAR.gltf.animations){ actions[clip.name.toLowerCase()]=mixer.clipAction(clip); }
+  if(actions.idle){ actions.idle.play(); }
+  outer.userData={isModel:true, model, mixer, actions, current:'idle', weaponMount, teamColor, shownGun:-1, crouchK:0};
+  return outer;
+}
+
+function fadeToAction(u,name,dur=0.18){
+  if(u.current===name || !u.actions[name]) return;
+  const to=u.actions[name], from=u.actions[u.current];
+  to.enabled=true; to.setEffectiveTimeScale(1); to.setEffectiveWeight(1); to.reset().play();
+  if(from) from.crossFadeTo(to,dur,false);
+  u.current=name;
+}
+
+// ---- procedural fallback rig (lathe body, ball joints, air tank) ----
+function createAvatarFallback(teamColor){
   const g=new THREE.Group();
   const suit=makeMat(teamColor,0.5,0.12);
   const skin=makeMat(0x2a2f3c,0.7);
@@ -1233,6 +1301,32 @@ function centerFlash(txt){ centerMsg(txt,''); setTimeout(hideCenter,900); }
 // ============================================================
 function animateAvatar(p,dt){
   const u=p.group.userData;
+
+  if(u.isModel){
+    u.mixer.update(dt);
+    u.crouchK += ((p.crouching?1:0)-u.crouchK)*Math.min(1,dt*10);
+    p.group.position.set(p.pos.x,p.pos.y,p.pos.z);
+    p.group.rotation.y=p.yaw;
+    const sp=Math.hypot(p.vel.x,p.vel.z);
+    fadeToAction(u, p.alive ? (sp>7?'run':sp>0.4?'walk':'idle') : 'idle');
+    if(u.shownGun!==p.gunIdx){
+      while(u.weaponMount.children.length) u.weaponMount.remove(u.weaponMount.children[0]);
+      u.weaponMount.add(buildWeapon(p.gunIdx,u.teamColor));
+      u.shownGun=p.gunIdx;
+    }
+    if(p.hpGroup){
+      if(p.alive && p!==GAME.local){
+        p.hpGroup.visible=true;
+        p.hpGroup.position.set(p.pos.x,p.pos.y+2.15,p.pos.z);
+        p.hpGroup.quaternion.copy(camera.quaternion);
+        const s=Math.max(0,p.hp)/HP_MAX;
+        p.hpFill.scale.x=s; p.hpFill.position.x=-(1-s)*0.5;
+        p.hpFill.material.color.setHex(p.hp<30?0xff4d6d:p.hp<60?0xffb347:0x3ddc84);
+      } else p.hpGroup.visible=false;
+    }
+    return;
+  }
+
   // crouch smoothing (drops the whole body + bends knees)
   const targetCrouch = p.crouching?1:0;
   u.crouchK += (targetCrouch-u.crouchK)*Math.min(1,dt*10);
@@ -1458,6 +1552,11 @@ function startGame(){
   startRound();
 }
 document.getElementById('startBtn').addEventListener('click',startGame);
+// hold Deploy until the character model is loaded (or has failed → fallback)
+(function gateDeploy(){
+  const b=document.getElementById('startBtn');
+  if(!CHAR.ready && !CHAR.failed){ b.disabled=true; b.textContent='LOADING FIGHTERS…'; }
+})();
 
 // single render loop (runs during menu as idle backdrop, then gameplay)
 GAME.started=true;
