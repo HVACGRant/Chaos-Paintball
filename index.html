@@ -159,6 +159,17 @@
         </div>
       </div>
 
+      <div class="field rowwide">
+        <label>Arena</label>
+        <div class="opts" id="arenaOpts">
+          <div class="opt on" data-v="warehouse">Warehouse</div>
+          <div class="opt" data-v="maze">Maze · Random</div>
+          <div class="opt" data-v="bunkers">Bunkers</div>
+          <div class="opt" data-v="tower">Tower</div>
+        </div>
+        <div class="mini">Maze rebuilds a fresh random layout every match. Bunkers favor team modes; Tower adds verticality and a sniper perch.</div>
+      </div>
+
       <div class="field">
         <label>Players (you + bots)</label>
         <div class="slider">
@@ -342,7 +353,7 @@ const CHAR = {
 
 // ---------- config gathered from menu ----------
 const CFG = {
-  mode:'ffa', view:'fps', players:10, gun:0, ammo:-1, winScore:100, room:'----', sens:0.45, assist:1
+  mode:'ffa', view:'fps', players:10, gun:0, ammo:-1, winScore:100, room:'----', sens:0.45, assist:1, arena:'warehouse'
 };
 const HP_MAX=100;
 const GUNS = [
@@ -367,6 +378,7 @@ bindOpts('assistOpts','assist',Number);
 bindOpts('gunOpts','gun',Number);
 bindOpts('ammoOpts','ammo',Number);
 bindOpts('scoreOpts','winScore',Number);
+bindOpts('arenaOpts','arena');
 const pc=document.getElementById('pcount');
 pc.addEventListener('input',()=>{document.getElementById('pcountV').textContent=pc.value;CFG.players=+pc.value;});
 
@@ -417,33 +429,56 @@ window.addEventListener('resize',()=>{
 const ARENA=46;                 // half-extent
 const obstacles=[];             // {mesh, box:THREE.Box3, half}
 const colliders=[];             // meshes for raycast LOS
+const arenaObjects=[];          // every mesh an arena builder adds — used for teardown
+const SPAWNS=[];                // {pos:Vector3, team:'A'|'B'|null} — arena-defined spawn points
+const MAZE={active:false,GS:0,cell:0,x0:0,z0:0};
 
-function addBox(x,y,z,w,h,d,color,rough=0.85){
+function addBox(x,y,z,w,h,d,color,rough=0.85,opts={}){
   const m=new THREE.Mesh(new THREE.BoxGeometry(w,h,d),
     new THREE.MeshStandardMaterial({color,roughness:rough,metalness:0.05}));
   m.position.set(x,y,z); m.castShadow=true; m.receiveShadow=true; scene.add(m);
   const box=new THREE.Box3().setFromObject(m);
-  obstacles.push({mesh:m,box,half:new THREE.Vector3(w/2,h/2,d/2),pos:new THREE.Vector3(x,y,z)});
-  colliders.push(m);
+  obstacles.push({mesh:m,box,half:new THREE.Vector3(w/2,h/2,d/2),pos:new THREE.Vector3(x,y,z),noStand:!!opts.noStand});
+  colliders.push(m); arenaObjects.push(m);
   return m;
 }
 
-function buildArena(){
-  // floor
+// tear down every mesh the current arena added so we can rebuild a fresh layout
+function clearArena(){
+  for(const m of arenaObjects){ scene.remove(m); if(m.geometry)m.geometry.dispose(); if(m.material&&m.material.dispose)m.material.dispose(); }
+  arenaObjects.length=0; obstacles.length=0; colliders.length=0;
+}
+
+// ---- shared pieces ----
+function buildFloor(col=0x1a2030){
   const floor=new THREE.Mesh(new THREE.PlaneGeometry(ARENA*2,ARENA*2),
-    new THREE.MeshStandardMaterial({color:0x1a2030,roughness:0.95}));
+    new THREE.MeshStandardMaterial({color:col,roughness:0.95}));
   floor.rotation.x=-Math.PI/2; floor.receiveShadow=true; scene.add(floor);
-  colliders.push(floor);
-  // grid accent
-  const grid=new THREE.GridHelper(ARENA*2,46,0x2a3346,0x1f2533); grid.position.y=0.02; scene.add(grid);
-
-  // perimeter walls
+  colliders.push(floor); arenaObjects.push(floor);
+  const grid=new THREE.GridHelper(ARENA*2,46,0x2a3346,0x1f2533); grid.position.y=0.02; scene.add(grid); arenaObjects.push(grid);
+}
+function buildPerimeter(){
   const wallH=6, t=2, C=0x10141d;
-  addBox(0,wallH/2,-ARENA, ARENA*2,wallH,t, C);
-  addBox(0,wallH/2, ARENA, ARENA*2,wallH,t, C);
-  addBox(-ARENA,wallH/2,0, t,wallH,ARENA*2, C);
-  addBox( ARENA,wallH/2,0, t,wallH,ARENA*2, C);
+  addBox(0,wallH/2,-ARENA, ARENA*2,wallH,t, C,0.85,{noStand:true});
+  addBox(0,wallH/2, ARENA, ARENA*2,wallH,t, C,0.85,{noStand:true});
+  addBox(-ARENA,wallH/2,0, t,wallH,ARENA*2, C,0.85,{noStand:true});
+  addBox( ARENA,wallH/2,0, t,wallH,ARENA*2, C,0.85,{noStand:true});
+}
 
+// ---- arena dispatcher ----
+function buildArena(){
+  clearArena();
+  SPAWNS.length=0; MAZE.active=false;
+  if(CFG.arena==='maze') buildMaze();
+  else if(CFG.arena==='bunkers') buildBunkers();
+  else if(CFG.arena==='tower') buildTower();
+  else buildWarehouse();
+}
+
+// ---- WAREHOUSE (original open layout) ----
+function buildWarehouse(){
+  buildFloor(0x1a2030);
+  buildPerimeter();
   // central structure
   addBox(0,2,0, 10,4,10, 0x232a3a);
   addBox(0,4.4,0, 12,0.8,12, 0x2d3548);
@@ -458,6 +493,107 @@ function buildArena(){
   // ramps / low walls for verticality feel (cover)
   addBox(-16,1,-8, 6,2,1.2, 0x2a3140);
   addBox(16,1,8, 6,2,1.2, 0x2a3140);
+  // open spawning (ring / team sides) handled by spawnPoint fallback
+}
+
+// ---- MAZE (recursive-backtracker, regenerated every match) ----
+function buildMaze(){
+  buildFloor(0x141a26);
+  buildPerimeter();
+  const GS=11;                       // cells per side
+  const span=ARENA*2-8;              // leave a margin inside the perimeter
+  const cell=span/GS;                // ~7.6m corridors
+  const t=0.6, h=4, C=0x222a3a;      // wall thickness / height / color
+  const x0=-span/2, z0=-span/2;
+
+  // grid of cells, each with four walls up
+  const cells=[];
+  for(let i=0;i<GS;i++){ cells[i]=[]; for(let j=0;j<GS;j++) cells[i][j]={n:true,e:true,s:true,w:true,v:false}; }
+  const dirs=[[0,-1,'n','s'],[1,0,'e','w'],[0,1,'s','n'],[-1,0,'w','e']];
+
+  // carve passages (iterative recursive backtracker)
+  const stack=[[0,0]]; cells[0][0].v=true;
+  while(stack.length){
+    const [x,z]=stack[stack.length-1];
+    const opts=[];
+    for(const [dx,dz,a,b] of dirs){ const nx=x+dx,nz=z+dz;
+      if(nx>=0&&nx<GS&&nz>=0&&nz<GS&&!cells[nx][nz].v) opts.push([dx,dz,a,b,nx,nz]); }
+    if(!opts.length){ stack.pop(); continue; }
+    const [dx,dz,a,b,nx,nz]=opts[(Math.random()*opts.length)|0];
+    cells[x][z][a]=false; cells[nx][nz][b]=false; cells[nx][nz].v=true; stack.push([nx,nz]);
+  }
+  // knock a few extra holes so it loops instead of dead-ending everywhere (less frustrating to play)
+  const extra=Math.floor(GS*GS*0.10);
+  for(let k=0;k<extra;k++){
+    const x=(Math.random()*GS)|0, z=(Math.random()*GS)|0, d=dirs[(Math.random()*4)|0];
+    const nx=x+d[0], nz=z+d[1];
+    if(nx>=0&&nx<GS&&nz>=0&&nz<GS){ cells[x][z][d[2]]=false; cells[nx][nz][d[3]]=false; }
+  }
+  // build each cell's N + W wall, plus the outer S/E boundary, so shared walls render once
+  for(let i=0;i<GS;i++){ for(let j=0;j<GS;j++){
+    const c=cells[i][j];
+    const cxw=x0+i*cell+cell/2, czw=z0+j*cell+cell/2;
+    if(c.n) addBox(cxw, h/2, z0+j*cell, cell+t, h, t, C,0.85,{noStand:true});
+    if(c.w) addBox(x0+i*cell, h/2, czw, t, h, cell+t, C,0.85,{noStand:true});
+    if(j===GS-1 && c.s) addBox(cxw, h/2, z0+(j+1)*cell, cell+t, h, t, C,0.85,{noStand:true});
+    if(i===GS-1 && c.e) addBox(x0+(i+1)*cell, h/2, czw, t, h, cell+t, C,0.85,{noStand:true});
+  }}
+  // spawns: a spread of far-apart cell centers
+  const cc=(i,j)=>new THREE.Vector3(x0+i*cell+cell/2,0,z0+j*cell+cell/2);
+  const m=Math.floor(GS/2), e=GS-1;
+  [[0,0],[e,e],[0,e],[e,0],[m,0],[m,e],[0,m],[e,m],[m,m]].forEach(([i,j],k)=>{
+    SPAWNS.push({pos:cc(i,j), team: GAME_TEAMSIDE(i,GS)});
+  });
+  MAZE.active=true; MAZE.GS=GS; MAZE.cell=cell; MAZE.x0=x0; MAZE.z0=z0;
+}
+function GAME_TEAMSIDE(i,GS){ return i<GS/2 ? 'A' : 'B'; }   // left half A, right half B (used only in team modes)
+function mazeCellCenter(){
+  const i=(Math.random()*MAZE.GS)|0, j=(Math.random()*MAZE.GS)|0;
+  return new THREE.Vector3(MAZE.x0+i*MAZE.cell+MAZE.cell/2,0,MAZE.z0+j*MAZE.cell+MAZE.cell/2);
+}
+
+// ---- BUNKERS (two fortified bases + no-man's-land) ----
+function buildBunkers(){
+  buildFloor(0x18202c);
+  buildPerimeter();
+  const W={noStand:true};
+  function base(sx, color){            // sx -1 = orange/A end, +1 = cyan/B end
+    const bx=sx*(ARENA-12);
+    addBox(bx+sx*4, 2.5, 0, 1.2, 5, 22, color,0.8,W);     // back wall
+    addBox(bx, 2.5, -11, 14, 5, 1.2, color,0.8,W);        // side wall
+    addBox(bx, 2.5,  11, 14, 5, 1.2, color,0.8,W);        // side wall
+    addBox(bx-sx*4.5, 1, -4.5, 3,2,3, 0x2c3140);          // sandbag cover
+    addBox(bx-sx*4.5, 1,  4.5, 3,2,3, 0x2c3140);
+  }
+  base(-1, 0x3a2418); base(1, 0x18303a);
+  // central peek wall splits the lane
+  addBox(0,1.4,0, 2,2.8,16, 0x232a3a,0.85,W);
+  // no-man's-land cover (avoid the center wall footprint)
+  [[-12,-9,3,2,3],[12,9,3,2,3],[-12,9,3,2,3],[12,-9,3,2,3],
+   [-6,-18,4,2.4,2],[6,18,4,2.4,2],[-6,18,4,2.4,2],[6,-18,4,2.4,2]]
+   .forEach(([x,z,w,hh,d])=>addBox(x,hh/2,z,w,hh,d,0x2a3140));
+  // spawns: team-separated at each end
+  for(let i=0;i<5;i++){
+    SPAWNS.push({pos:new THREE.Vector3(-(ARENA-8),0,(i-2)*4), team:'A'});
+    SPAWNS.push({pos:new THREE.Vector3( ARENA-8,0,(i-2)*4), team:'B'});
+  }
+}
+
+// ---- TOWER (stepped ziggurat — verticality + sniper perch) ----
+function buildTower(){
+  buildFloor(0x141824);
+  buildPerimeter();
+  // concentric standable tiers, each rises ~0.9m so a jump clears to the next
+  const tiers=[[24,0.9,0x2a3142],[18,1.8,0x303a4e],[12,2.7,0x37425a],[7,3.6,0x3e4a66]];
+  tiers.forEach(([sz,topY,col])=>addBox(0, topY/2, 0, sz, topY, sz, col));   // standable (no noStand)
+  // a few ground-level cover boxes around the base, symmetric
+  [[-26,-26],[26,26],[-26,26],[26,-26],[-30,0],[30,0],[0,-30],[0,30]].forEach(([x,z],i)=>{
+    const s=2.4+(i%2)*0.6; addBox(x,s/2,z, s,s,s, i%2?0x2c3140:0x33281c);
+  });
+  // spawns spread on the ground ring, team-split by side
+  const ring=[[-32,-10,'A'],[-32,10,'A'],[-22,-28,'A'],[-22,28,'A'],[ -12,0,'A'],
+              [ 32,-10,'B'],[ 32,10,'B'],[ 22,-28,'B'],[ 22,28,'B'],[  12,0,'B']];
+  ring.forEach(([x,z,team])=>SPAWNS.push({pos:new THREE.Vector3(x,0,z), team}));
 }
 
 // ============================================================
@@ -664,7 +800,19 @@ function makePlayer(team,isBot,name){
   };
 }
 
+let _spawnIdx=0;
 function spawnPoint(team,idx){
+  // arena-defined spawns take priority (far-apart, layout-aware)
+  if(SPAWNS.length){
+    let pool=SPAWNS;
+    if(GAME.teamMode && team){
+      const f=SPAWNS.filter(s=>s.team===team || s.team==null);
+      if(f.length) pool=f;
+    }
+    const s=pool[idx % pool.length];
+    return new THREE.Vector3(s.pos.x+(Math.random()*2-1), 0, s.pos.z+(Math.random()*2-1));
+  }
+  // fallback (warehouse / open): team sides or random ring
   if(GAME.teamMode){
     const baseX = team==='A' ? -ARENA+8 : ARENA-8;
     const z=(idx%5-2)*5 + (Math.random()*3-1.5);
@@ -678,6 +826,8 @@ function setupMatch(){
   matchNumber++; BOT_DIFF=Math.min(1, 0.25*matchNumber);
   GAME.teamMode = CFG.mode!=='ffa';
   GAME.objMode = (CFG.mode==='ctf'||CFG.mode==='dom');
+  // (re)build the chosen arena — maze gets a fresh random layout every match
+  buildArena();
   GAME.players.forEach(p=>{scene.remove(p.group); if(p.hpGroup)scene.remove(p.hpGroup);});
   GAME.players=[];
   const N=CFG.players;
@@ -1158,8 +1308,8 @@ function resolveCollision(p){
 function groundHeight(p){
   let h=0; const r=0.5;
   for(const o of obstacles){
+    if(o.noStand)continue;              // walls/fences are not standable surfaces
     const top=o.pos.y+o.half.y;
-    if(top>5.2)continue; // skip walls top
     const minX=o.pos.x-o.half.x-r*0.6, maxX=o.pos.x+o.half.x+r*0.6;
     const minZ=o.pos.z-o.half.z-r*0.6, maxZ=o.pos.z+o.half.z+r*0.6;
     if(p.pos.x>minX&&p.pos.x<maxX&&p.pos.z>minZ&&p.pos.z<maxZ){
@@ -1326,7 +1476,8 @@ function updateBot(p,dt){
     if(!p.patrolTarget || p.pos.distanceTo(p.patrolTarget)<2.6 || now>p.aiRepath){
       p.aiRepath=now+3+Math.random()*3;
       p.patrolTarget = objTarget ? objTarget.clone()
-        : new THREE.Vector3((Math.random()*2-1)*(ARENA-6),0,(Math.random()*2-1)*(ARENA-6));
+        : (MAZE.active ? mazeCellCenter()
+        : new THREE.Vector3((Math.random()*2-1)*(ARENA-6),0,(Math.random()*2-1)*(ARENA-6)));
     }
     const dx=p.patrolTarget.x-p.pos.x, dz=p.patrolTarget.z-p.pos.z;
     moveX+=dx; moveZ+=dz;
@@ -1343,6 +1494,16 @@ function updateBot(p,dt){
   resolveCollision(p);
   const gh=groundHeight(p);
   if(p.pos.y<=gh){p.pos.y=gh;p.vel.y=0;p.onGround=true;}else p.onGround=false;
+
+  // stuck recovery: if a navigating bot has barely moved, pick a new heading/target
+  // (keeps them from grinding into maze/bunker walls)
+  if(!p._sp) p._sp=p.pos.clone();
+  const movedF=p.pos.distanceTo(p._sp); p._sp.copy(p.pos);
+  if((p.aiState==='patrol'||p.aiState==='search') && movedF<0.03){
+    p._stuckT=(p._stuckT||0)+dt;
+    if(p._stuckT>0.55){ p._stuckT=0; p.aiRepath=0; p.patrolTarget=null;
+      p.yaw+=Math.PI*(0.5+Math.random()); if(p.onGround){p.vel.y=7;p.onGround=false;} }
+  } else p._stuckT=0;
 
   if(wantShoot) shoot(p);
 }
@@ -1557,11 +1718,17 @@ function startBonus(){
   document.getElementById('bonusHud').style.display='block';
   if(isTouch)document.getElementById('touch').style.display='block';
   BONUS.active=true; BONUS.level=1;
+  // clean flat range for the sniper stage (no arena geometry blocking the lane)
+  buildRange();
   // clear arena players visually
   GAME.players.forEach(p=>p.group.visible=false);
   if(GAME.flags.A){GAME.flags.A.mesh.visible=false;GAME.flags.B.mesh.visible=false;}
   buildBonusLevel();
   GAME.local.gunIdx=2; // sniper only
+}
+function buildRange(){
+  clearArena(); SPAWNS.length=0; MAZE.active=false;
+  buildFloor(0x161c28); buildPerimeter();
 }
 function clearBonusTargets(){ BONUS.targets.forEach(t=>scene.remove(t.mesh)); BONUS.targets=[]; }
 function buildBonusLevel(){
